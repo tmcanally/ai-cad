@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI CAD Viewer</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/static/vendor/three/three.module.min.js",
+        "three/addons/controls/OrbitControls.js": "/static/vendor/three/OrbitControls.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <div id="viewport"><canvas id="canvas"></canvas>
+      <div id="status" role="status"></div>
+      <div id="hint">Drag to orbit · right-drag to pan · scroll to zoom</div>
+    </div>
+    <aside id="panel">
+      <header>
+        <h1>AI CAD</h1>
+        <label class="follow" title="Switch automatically when Claude builds a design over MCP">
+          <input type="checkbox" id="follow" checked> Follow Claude
+        </label>
+      </header>
+
+      <section>
+        <label for="design-select" class="section-title">Design</label>
+        <select id="design-select"></select>
+        <p id="design-desc" class="muted"></p>
+      </section>
+
+      <section>
+        <div class="section-title">Explode</div>
+        <div class="slider-row">
+          <input type="range" id="explode" min="0" max="1" step="0.001" value="0" aria-label="Explode">
+          <output id="explode-out">0%</output>
+        </div>
+      </section>
+
+      <section id="motions-section">
+        <div class="section-title row">
+          <span>Motion</span>
+          <button id="play-all" class="small">▶ Play</button>
+        </div>
+        <div id="motions"></div>
+      </section>
+
+      <section>
+        <div class="section-title">Parts</div>
+        <ul id="parts"></ul>
+        <a id="download-all" class="button" href="#">Download all STLs (.zip)</a>
+      </section>
+
+      <section>
+        <div class="section-title row">
+          <span>Parameters</span>
+          <button id="reset-params" class="small ghost">Reset</button>
+        </div>
+        <form id="params"></form>
+        <button id="rebuild" form="params" type="submit">Rebuild</button>
+      </section>
+
+      <section>
+        <p id="notes" class="muted"></p>
+      </section>
+    </aside>
+  </div>
+  <script type="module" src="/static/viewer.js"></script>
+</body>
+</html>
