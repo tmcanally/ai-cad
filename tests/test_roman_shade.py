@@ -137,3 +137,43 @@ def test_motorized_drive_is_hidden_and_clear(top_drop, bottom_raise):
 def test_spring_version_is_the_default():
     design, _ = registry.build("roman_shade", {})
     assert "springs" in [p.name for p in design.parts]
+
+
+M5_BED = (235, 235, 250)  # AnkerMake M5 build volume, mm
+
+
+@pytest.mark.parametrize("motorized", [0, 1])
+def test_print_pieces_fit_the_printer_and_pin_together(motorized):
+    design, params = registry.build("roman_shade", {"print_pieces": 1, "motorized": motorized})
+    printed = [p for p in design.parts if p.material.startswith("Print")]
+    assert {p.name.rsplit("_", 1)[0] for p in printed} == {
+        "headrail", "channel_left", "channel_right", "middle_rail", "bottom_rail"
+    }
+    for p in printed:
+        assert p.shape.is_valid and len(p.shape.solids()) == 1, p.name
+        dims = sorted(tuple(p.shape.bounding_box().size))
+        assert all(d <= b for d, b in zip(dims, sorted(M5_BED))), (p.name, dims)
+
+    # Every pin sits in a hole (touches no printed material) and bridges exactly two pieces.
+    pins = [s for p in design.parts if p.name.startswith("pins_") for s in p.shape.solids()]
+    assert pins
+    for pin in pins:
+        pb = pin.bounding_box()
+        pmin, pmax = tuple(pb.min), tuple(pb.max)
+        neighbours = []
+        for p in printed:
+            assert not _overlap(pin, p.shape), p.name
+            bb = p.shape.bounding_box()
+            bmin, bmax = tuple(bb.min), tuple(bb.max)
+            if all(bmin[i] - 0.01 <= pmax[i] and pmin[i] <= bmax[i] + 0.01 for i in range(3)):
+                neighbours.append(p.name)
+        assert len(neighbours) >= 2, neighbours
+
+
+def test_print_pieces_add_up_to_the_assembled_parts():
+    assembled, _ = registry.build("roman_shade", {})
+    pieces, _ = registry.build("roman_shade", {"print_pieces": 1})
+    for name in ("headrail", "middle_rail"):
+        whole = assembled.part(name).shape.volume
+        parts = sum(p.shape.volume for p in pieces.parts if p.name.startswith(name + "_"))
+        assert parts == pytest.approx(whole, rel=0.02)  # only the pin and screw holes are missing

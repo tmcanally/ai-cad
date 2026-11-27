@@ -31,6 +31,18 @@ with the power off. A controller board (ESP32 + two TMC2209 drivers, which can
 home without limit switches) sits on the back wall of the headrail. One power
 lead goes into the headrail; nothing else shows.
 
+Printing it (print_pieces = 1)
+------------------------------
+Every structural part is sized for a home 3D printer. The headrail, side
+channels and rails are cut into pieces no longer than `max_piece_length`
+(240 mm fits the AnkerMake M5's 235 x 235 x 250 mm when printed standing up,
+which also means the channel and headrail profiles need no supports). Pieces
+join with short lengths of 1.75 mm filament pushed into matching holes, so
+assembly is: push pins in, push pieces together, screw the channels to the
+window frame and the headrail to the head of the frame. The thicker wall on
+the frame side of the channels and on the back of the headrail is there to
+hold those pins. Fabric, battens, springs, motors and belts are bought parts.
+
 The two "position" parameters (top_drop and bottom_raise) are what the
 Motion sliders sweep. The build works out every batten and fold from them.
 """
@@ -51,9 +63,10 @@ PARAMS = {
     "window_height": Param(1200, 500, 2800, description="Inside height of the window frame"),
     "headrail_height": Param(45, 30, 100, description="Headrail height (houses the springs)"),
     "headrail_depth": Param(50, 35, 120, description="Headrail depth front to back"),
-    "channel_width": Param(22, 14, 50, description="Side channel width across the window"),
+    "channel_width": Param(25, 16, 50, description="Side channel width across the window"),
     "channel_depth": Param(30, 20, 60, description="Side channel depth front to back"),
     "channel_wall": Param(2, 1, 4, description="Side channel wall thickness"),
+    "mount_wall": Param(5, 3, 10, description="Wall against the frame (channels) and wall (headrail back); holds the joint pins"),
     "slot_width": Param(10, 4, 30, description="Opening in each channel that pins and carriers pass through"),
     "rail_height": Param(30, 15, 60, description="Middle and bottom rail height"),
     "rail_depth": Param(22, 12, 50, description="Middle and bottom rail depth"),
@@ -68,6 +81,11 @@ PARAMS = {
     "motor_length": Param(45, 25, 80, description="Motor length including its gearbox"),
     "pulley_diameter": Param(10, 6, 16, description="Belt pulley diameter (10 = GT2 16-tooth)"),
     "belt_width": Param(6, 4, 9, description="Timing belt width"),
+    "print_pieces": Param(0, 0, 1, unit="", description="Show as printable pieces: 0 = assembled parts, 1 = pieces with pin joints"),
+    "max_piece_length": Param(240, 100, 400, description="Longest printed piece (AnkerMake M5: 235 x 235 x 250)"),
+    "pin_diameter": Param(1.75, 1.75, 4, description="Joint pin diameter (1.75 = a length of filament)"),
+    "pin_clearance": Param(0.25, 0.1, 0.6, description="Extra hole size for the pins"),
+    "screw_hole": Param(4, 3, 6, description="Mounting screw hole diameter"),
     "top_drop": Param(0, 0, 2000, description="Position: how far the top of the shade is lowered"),
     "bottom_raise": Param(0, 0, 2000, description="Position: how far the bottom of the shade is raised"),
 }
@@ -80,9 +98,10 @@ def build(
     window_height=1200,
     headrail_height=45,
     headrail_depth=50,
-    channel_width=22,
+    channel_width=25,
     channel_depth=30,
     channel_wall=2,
+    mount_wall=5,
     slot_width=10,
     rail_height=30,
     rail_depth=22,
@@ -97,6 +116,11 @@ def build(
     motor_length=45,
     pulley_diameter=10,
     belt_width=6,
+    print_pieces=0,
+    max_piece_length=240,
+    pin_diameter=1.75,
+    pin_clearance=0.25,
+    screw_hole=4,
     top_drop=0,
     bottom_raise=0,
 ) -> Design:
@@ -104,8 +128,10 @@ def build(
     cw, cd, wall = channel_width, channel_depth, channel_wall
     rh, rd, bt, ft = rail_height, rail_depth, batten_size, fabric_thickness
     top = H - headrail_height  # underside of the headrail
+    mw = max(mount_wall, wall)
     inner_w = W - 2 * cw  # clear width between the channels
-    chan_x = W / 2 - cw / 2  # channel centre lines
+    inner_cw = cw - wall - mw  # inside width of a channel
+    chan_x = W / 2 - mw - inner_cw / 2  # centre line of each channel's inside
 
     # ---------------- fabric layout and the two positions ----------------
     fabric_len = top - 2 * rh  # fabric between the rails when the shade is fully closed
@@ -131,20 +157,25 @@ def build(
 
     # ---------------- side channels ----------------
     def channel(side: int):
-        body = Box(cw, cd, top, align=C_MIN)
-        body -= Pos(0, 0, -1) * Box(cw - 2 * wall, cd - 2 * wall, top + 2, align=C_MIN)
-        body -= Pos(-side * (cw / 2 - wall / 2), 0, -1) * Box(wall * 2, slot_width, top + 2, align=C_MIN)
-        return Pos(side * chan_x, 0, 0) * body
+        body = Pos(side * (W / 2 - cw / 2), 0, 0) * Box(cw, cd, top, align=C_MIN)
+        body -= Pos(side * chan_x, 0, -1) * Box(inner_cw, cd - 2 * wall, top + 2, align=C_MIN)
+        # Slot in the inboard wall for the rail tongues and batten pins.
+        body -= Pos(side * (W / 2 - cw + wall / 2), 0, -1) * Box(wall * 2, slot_width, top + 2, align=C_MIN)
+        return body
 
-    channels = channel(-1) + channel(1)
+    channel_l, channel_r = channel(-1), channel(1)
+    channels = channel_l + channel_r
 
     # ---------------- headrail with spring housings ----------------
     head = Pos(0, 0, top) * Box(W, headrail_depth, headrail_height, align=C_MIN)
     head = fillet(head.edges().filter_by(Axis.X).group_by(Axis.Y)[0], min(6, headrail_height / 4))
-    head -= Pos(0, 0, top - 1) * Box(W - 2 * wall, headrail_depth - 2 * wall, headrail_height - wall + 1, align=C_MIN)
+    head_back = headrail_depth / 2 - mw  # inside face of the (thicker) back wall
+    head_front = -headrail_depth / 2 + wall
+    head -= Pos(0, (head_back + head_front) / 2, top - 1) * Box(
+        W - 2 * wall, head_back - head_front, headrail_height - wall + 1, align=C_MIN
+    )
 
     motor_on = motorized >= 0.5
-    inner_cw = cw - 2 * wall
     inner_d = cd - 2 * wall
     springs, tapes = [], []
     drive, belts = [], []
@@ -157,7 +188,13 @@ def build(
         tape_y = {"middle": -(cd / 2 - wall - 3), "bottom": cd / 2 - wall - 3}
         tape_dx = {"middle": -min(tape_width / 2 + 1, inner_cw / 4), "bottom": min(tape_width / 2 + 1, inner_cw / 4)}
         coil_w = min(tape_width + 1, inner_cw / 2 - 0.5)
-        spring_r = min(spring_diameter / 2, headrail_height / 2 - wall - 0.5, headrail_depth / 2 - wall - abs(tape_y["middle"]) - 0.5)
+        # Each coil touches its tape's line on one side, so it reaches 2r towards the other wall.
+        spring_r = min(
+            spring_diameter / 2,
+            headrail_height / 2 - wall - 0.5,
+            (head_back - 0.5 - tape_y["middle"]) / 2,
+            (tape_y["bottom"] - head_front - 0.5) / 2,
+        )
         coil_z = top + headrail_height / 2
         for side in (-1, 1):
             for rail, carrier_top in (("middle", mid_top), ("bottom", bottom_raise + rh)):
@@ -195,7 +232,7 @@ def build(
                 for dy in (-pr, pr):  # the two strands of the loop
                     belts.append(Pos(x, yc + dy, idler_z) * Box(bw, 1.5, pz - idler_z, align=C_MIN))
         # Controller on the back wall of the headrail.
-        drive.append(Pos(0, headrail_depth / 2 - wall - 3, top + wall + 2) * Box(60, 4, min(25, headrail_height - 2 * wall - 4), align=C_MIN))
+        drive.append(Pos(0, head_back - 3, top + wall + 2) * Box(60, 4, min(25, headrail_height - 2 * wall - 4), align=C_MIN))
 
     # ---------------- rails with end carriers ----------------
     def rail(z_bottom: float, carrier_y: float, carrier_d: float, clamp_y: float | None = None):
@@ -205,7 +242,7 @@ def build(
             # Tongue through the slot, then a carrier block inside the channel.
             body += Pos(side * (inner_w / 2 + wall), 0, z_bottom + rh / 2) * Box(wall * 2 + 2, slot_width - 1, rh * 0.6)
             if clamp_y is None:  # spring version: carrier fills the channel width, with friction pads
-                body += Pos(side * chan_x, carrier_y, z_bottom) * Box(cw - 2 * wall - 1, carrier_d, rh, align=C_MIN)
+                body += Pos(side * chan_x, carrier_y, z_bottom) * Box(inner_cw - 1, carrier_d, rh, align=C_MIN)
             else:  # motor version: carrier in the inner half, plus an arm that clamps its belt strand
                 cwid = inner_cw / 2 - 1
                 body += Pos(side * (chan_x - inner_cw / 4 - 0.25), carrier_y, z_bottom) * Box(cwid, carrier_d, rh, align=C_MIN)
@@ -230,42 +267,141 @@ def build(
     # ---------------- battens with pins into the channels ----------------
     batten_y = ft + bt / 2  # just behind the fabric, inside its pocket
     battens = [
-        Pos(0, batten_y, z) * Box(W - 2 * wall - 2, bt, bt) for z in anchors[1:-1]
+        Pos(0, batten_y, z) * Box(W - 2 * mw - 2, bt, bt) for z in anchors[1:-1]
     ]
 
     # ---------------- fabric: flat where taut, folded forward where slack ----------------
     folds = [_fabric_segment(a, b, pitch, ft, inner_w - 2) for a, b in zip(anchors[:-1], anchors[1:])]
 
     open_gap = (anchors[0] - anchors[-1]) > pitch * n_folds - 1
+    PRINT = "Print in PETG"
+    motions = [
+        Motion.from_param("lower_top", "top_drop", (0, top - 2 * rh - stack)),
+        Motion.from_param("raise_bottom", "bottom_raise", (0, top - 2 * rh - stack)),
+    ]
+    notes = (
+        f"{n_folds} folds of {pitch:.0f} mm, {n_battens} battens. "
+        + ("Shade fully closed. " if open_gap and top_drop == 0 and bottom_raise == 0 else "")
+        + (
+            "No lift cords: rails are carried by constant-force springs inside the channels and held by friction pads."
+            if not motor_on
+            else "Motorized: each rail is driven at both ends by belts inside the channels; the geared motors hold it with the power off."
+        )
+    )
+    bought = [
+        *([Part("springs", Compound(springs + tapes), color="#8f99a6", explode=(0, 0, headrail_height * 3),
+                material="Buy: 4 constant-force springs (steel tape)")] if not motor_on else [
+           Part("drive", Compound(drive), color="#5b6470", explode=(0, 0, headrail_height * 3),
+                material="Buy: 2 geared steppers, 2 shafts, 4 GT2 pulleys + 4 idlers, ESP32 + 2 TMC2209"),
+           Part("belts", Compound(belts), color="#c9772b", explode=(0, 0, 0), material="Buy: GT2 timing belt"),
+        ]),
+        Part("fabric", Compound(folds), color="#e8dcc4", explode=(0, -rd * 3, 0), material="Buy: fabric"),
+        Part("battens", Compound(battens) if battens else Box(1, 1, 1), color="#a0724a", explode=(0, rd * 4, 0),
+             material=f"Buy: {n_battens} x {bt:g} mm dowels, {W - 2 * mw - 2:.0f} mm long"),
+    ]
+
+    if print_pieces < 0.5:
+        return Design(
+            name="roman_shade",
+            parts=[
+                Part("headrail", head, color="#d7dbe0", explode=(0, 0, headrail_height * 3), material="Aluminium or printed PETG"),
+                bought[0] if not motor_on else bought[0],
+                *(bought[1:2] if motor_on else []),
+                Part("channels", channels, color="#c3c9d1", explode=(0, 0, 0), material="Aluminium or printed PETG"),
+                Part("middle_rail", middle, color="#4f7cac", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
+                Part("bottom_rail", bottom, color="#3d5f86", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
+                *bought[-2:],
+            ],
+            motions=motions,
+            notes=notes,
+        )
+
+    # ---------------- printable pieces ----------------
+    pin_r = (pin_diameter + pin_clearance) / 2
+    pin_depth = 10
+    sx = (-1, 1)
+    printed: list[Part] = []
+    pin_parts: list[Part] = []
+    pin_count = 0
+
+    def pieces(name, shape, axis, pin_spots, screws, color, explode):
+        """Cut `shape` into pieces along `axis` (0=X, 2=Z) with pin holes at each cut."""
+        nonlocal pin_count
+        pins = []
+        bb = shape.bounding_box()
+        lo, hi = (bb.min.X, bb.max.X) if axis == 0 else (bb.min.Z, bb.max.Z)
+        n = max(1, math.ceil((hi - lo) / max_piece_length))
+        cuts = [lo + (hi - lo) * k / n for k in range(1, n)]
+        for ci, c in enumerate(cuts, start=1):
+            cut_pins = []
+            for a, b in pin_spots:
+                if axis == 0:
+                    hole = Pos(c, a, b) * Rot(0, 90, 0) * Cylinder(pin_r, 2 * pin_depth)
+                    pin = Pos(c, a, b) * Rot(0, 90, 0) * Cylinder(pin_diameter / 2, 2 * pin_depth - 1)
+                else:
+                    hole = Pos(a, b, c) * Cylinder(pin_r, 2 * pin_depth)
+                    pin = Pos(a, b, c) * Cylinder(pin_diameter / 2, 2 * pin_depth - 1)
+                shape = shape - hole
+                cut_pins.append(pin)
+            pins.append((ci, cut_pins))
+        edges = [lo - 1] + cuts + [hi + 1]
+        big = 10 * max(W, H)
+        gap = 30
+        for k in range(n):
+            a, b = edges[k], edges[k + 1]
+            if axis == 0:
+                slab = Pos((a + b) / 2, 0, H / 2) * Box(b - a, big, big)
+            else:
+                slab = Pos(0, 0, (a + b) / 2) * Box(big, big, b - a)
+            piece = shape & slab
+            for spot in screws(a, b):
+                piece = piece - spot
+            offset = (k - (n - 1) / 2) * gap
+            ex = (explode[0] + (offset if axis == 0 else 0), explode[1], explode[2] + (offset if axis == 2 else 0))
+            printed.append(Part(f"{name}_{k + 1}", piece, color=color, explode=ex, material=PRINT))
+        for ci, cut_pins in pins:
+            # When exploded, each joint's pins sit halfway between the two pieces they join.
+            offset = (ci - n / 2) * gap
+            ex = (explode[0] + (offset if axis == 0 else 0), explode[1], explode[2] + (offset if axis == 2 else 0))
+            pin_count += len(cut_pins)
+            pin_parts.append(Part(f"pins_{name}_{ci}", Compound(cut_pins), color="#e04f4f", explode=ex,
+                                  material=f"{len(cut_pins)} pins: {pin_diameter:g} mm filament cut to {2 * pin_depth - 1} mm"))
+
+    # Headrail: pins in the thick back wall; screw holes up through the top into the head of the frame.
+    hz = headrail_height
+    pieces(
+        "headrail", head, 0,
+        [((head_back + headrail_depth / 2) / 2, top + hz * f) for f in (0.3, 0.7)],
+        lambda a, b: [Pos(a + (b - a) * f, 0, top + hz - wall / 2) * Cylinder(screw_hole / 2, wall * 3) for f in (0.25, 0.75)],
+        "#d7dbe0", (0, 0, hz * 3),
+    )
+    # Channels: pins in the thick frame-side wall; screw holes through it into the frame.
+    for side, chan, label in ((-1, channel_l, "channel_left"), (1, channel_r, "channel_right")):
+        wall_x = side * (W / 2 - mw / 2)
+        pieces(
+            label, chan, 2,
+            [(wall_x, y) for y in (-cd / 4, cd / 4)],
+            lambda a, b, wall_x=wall_x: [
+                Pos(wall_x, 0, a + (b - a) * f) * Rot(0, 90, 0) * Cylinder(screw_hole / 2, mw * 3) for f in (0.25, 0.75)
+            ],
+            "#c3c9d1", (side * 60, 0, 0),
+        )
+    # Rails: two pins through the solid section at each cut.
+    for name, shape, zb, color in (("middle_rail", middle, z0, "#4f7cac"), ("bottom_rail", bottom, bottom_raise, "#3d5f86")):
+        pieces(name, shape, 0, [(0, zb + rh * f) for f in (0.3, 0.7)], lambda a, b: [], color, (0, -rd * 6, 0))
+
+    longest = max(max(tuple(p.shape.bounding_box().size)) for p in printed)
     return Design(
         name="roman_shade",
         parts=[
-            Part("headrail", head, color="#d7dbe0", explode=(0, 0, headrail_height * 3), material="Aluminium or printed PETG"),
-            *([Part("springs", Compound(springs + tapes), color="#8f99a6", explode=(0, 0, headrail_height * 3),
-                    material="Constant-force springs (steel tape)")] if not motor_on else [
-               Part("drive", Compound(drive), color="#5b6470", explode=(0, 0, headrail_height * 3),
-                    material="2x geared stepper, 6 mm shafts, GT2 pulleys and idlers, ESP32 + TMC2209"),
-               Part("belts", Compound(belts), color="#c9772b", explode=(0, 0, 0), material="GT2 timing belt"),
-            ]),
-            Part("channels", channels, color="#c3c9d1", explode=(0, 0, 0), material="Aluminium or printed PETG"),
-            Part("middle_rail", middle, color="#4f7cac", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
-            Part("bottom_rail", bottom, color="#3d5f86", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
-            Part("fabric", Compound(folds), color="#e8dcc4", explode=(0, -rd * 3, 0), material="Fabric"),
-            Part("battens", Compound(battens) if battens else Box(1, 1, 1), color="#a0724a", explode=(0, rd * 4, 0),
-                 material="6-8 mm wood or fibreglass rod"),
+            *printed,
+            *pin_parts,
+            *bought,
         ],
-        motions=[
-            Motion.from_param("lower_top", "top_drop", (0, top - 2 * rh - stack)),
-            Motion.from_param("raise_bottom", "bottom_raise", (0, top - 2 * rh - stack)),
-        ],
+        motions=motions,
         notes=(
-            f"{n_folds} folds of {pitch:.0f} mm, {n_battens} battens. "
-            + ("Shade fully closed. " if open_gap and top_drop == 0 and bottom_raise == 0 else "")
-            + (
-                "No lift cords: rails are carried by constant-force springs inside the channels and held by friction pads."
-                if not motor_on
-                else "Motorized: each rail is driven at both ends by belts inside the channels; the geared motors hold it with the power off."
-            )
+            f"{len(printed)} printed pieces, longest {longest:.0f} mm (print standing up), "
+            f"joined with {pin_count} filament pins. " + notes
         ),
     )
 
