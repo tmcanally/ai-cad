@@ -18,6 +18,19 @@ cords: when the bottom rail rises it picks up each batten in turn, and the
 fabric between battens folds forward into the usual Roman shade pleats.
 
 Coordinates: X across the window, Z up from the sill, -Y towards the room.
+Motorized version (motorized = 1)
+---------------------------------
+The springs and friction pads give way to two small geared stepper motors in
+the headrail, one per rail. Each motor sits on its own cross shaft with a GT2
+pulley above each channel, and a timing-belt loop runs down the outer half of
+each channel to an idler at the sill. Each rail's carriers clamp one strand of
+their belt, so both ends of a rail always move together and it stays level.
+The middle rail's belts run in the front of the channels and the bottom
+rail's in the back. A worm or high-ratio gearbox keeps the shade where it is
+with the power off. A controller board (ESP32 + two TMC2209 drivers, which can
+home without limit switches) sits on the back wall of the headrail. One power
+lead goes into the headrail; nothing else shows.
+
 The two "position" parameters (top_drop and bottom_raise) are what the
 Motion sliders sweep. The build works out every batten and fold from them.
 """
@@ -31,7 +44,7 @@ from build123d import Align, Axis, Box, Compound, Cylinder, Face, Line, Pos, Rot
 from aicad.design import Design, Motion, Param, Part
 
 TITLE = "Roman shade, top-down/bottom-up"
-DESCRIPTION = "Cordless TDBU Roman shade: rails ride in side channels on hidden constant-force springs."
+DESCRIPTION = "Cordless TDBU Roman shade: rails ride in side channels on hidden springs, or on hidden belts and motors."
 
 PARAMS = {
     "window_width": Param(900, 400, 2400, description="Inside width of the window frame"),
@@ -50,6 +63,11 @@ PARAMS = {
     "fabric_thickness": Param(1.5, 0.5, 5, description="Fabric thickness"),
     "spring_diameter": Param(28, 12, 40, description="Constant-force spring coil diameter"),
     "tape_width": Param(8, 4, 20, description="Spring tape width"),
+    "motorized": Param(0, 0, 1, unit="", description="Drive: 0 = springs (push by hand), 1 = motors and belts"),
+    "motor_size": Param(20, 14, 28, description="Stepper body size (20 = NEMA 8, 28 = NEMA 11)"),
+    "motor_length": Param(45, 25, 80, description="Motor length including its gearbox"),
+    "pulley_diameter": Param(10, 6, 16, description="Belt pulley diameter (10 = GT2 16-tooth)"),
+    "belt_width": Param(6, 4, 9, description="Timing belt width"),
     "top_drop": Param(0, 0, 2000, description="Position: how far the top of the shade is lowered"),
     "bottom_raise": Param(0, 0, 2000, description="Position: how far the bottom of the shade is raised"),
 }
@@ -74,6 +92,11 @@ def build(
     fabric_thickness=1.5,
     spring_diameter=28,
     tape_width=8,
+    motorized=0,
+    motor_size=20,
+    motor_length=45,
+    pulley_diameter=10,
+    belt_width=6,
     top_drop=0,
     bottom_raise=0,
 ) -> Design:
@@ -120,42 +143,89 @@ def build(
     head = fillet(head.edges().filter_by(Axis.X).group_by(Axis.Y)[0], min(6, headrail_height / 4))
     head -= Pos(0, 0, top - 1) * Box(W - 2 * wall, headrail_depth - 2 * wall, headrail_height - wall + 1, align=C_MIN)
 
-    # Each channel has two springs, one per rail. A coil's axis runs across the
-    # window; its tape leaves the coil tangentially and drops straight down the
-    # channel. The middle rail's tape runs down the front of the channel and the
-    # bottom rail's down the back, and the two coils sit side by side so they
-    # fit in the headrail.
+    motor_on = motorized >= 0.5
     inner_cw = cw - 2 * wall
-    tape_y = {"middle": -(cd / 2 - wall - 3), "bottom": cd / 2 - wall - 3}
-    tape_dx = {"middle": -min(tape_width / 2 + 1, inner_cw / 4), "bottom": min(tape_width / 2 + 1, inner_cw / 4)}
-    coil_w = min(tape_width + 1, inner_cw / 2 - 0.5)
-    spring_r = min(spring_diameter / 2, headrail_height / 2 - wall - 0.5, headrail_depth / 2 - wall - abs(tape_y["middle"]) - 0.5)
-    coil_z = top + headrail_height / 2
+    inner_d = cd - 2 * wall
     springs, tapes = [], []
-    for side in (-1, 1):
-        for rail, carrier_top in (("middle", mid_top), ("bottom", bottom_raise + rh)):
-            x = side * (chan_x + tape_dx[rail])  # inboard for the middle rail, outboard for the bottom
-            y = tape_y[rail]
-            coil_y = y + spring_r if rail == "middle" else y - spring_r
-            springs.append(Pos(x, coil_y, coil_z) * Rot(0, 90, 0) * Cylinder(spring_r, coil_w))
-            tapes.append(Pos(x, y, carrier_top) * Box(min(tape_width, coil_w), 0.4, coil_z - carrier_top, align=C_MIN))
+    drive, belts = [], []
+    if not motor_on:
+        # Each channel has two springs, one per rail. A coil's axis runs across the
+        # window; its tape leaves the coil tangentially and drops straight down the
+        # channel. The middle rail's tape runs down the front of the channel and the
+        # bottom rail's down the back, and the two coils sit side by side so they
+        # fit in the headrail.
+        tape_y = {"middle": -(cd / 2 - wall - 3), "bottom": cd / 2 - wall - 3}
+        tape_dx = {"middle": -min(tape_width / 2 + 1, inner_cw / 4), "bottom": min(tape_width / 2 + 1, inner_cw / 4)}
+        coil_w = min(tape_width + 1, inner_cw / 2 - 0.5)
+        spring_r = min(spring_diameter / 2, headrail_height / 2 - wall - 0.5, headrail_depth / 2 - wall - abs(tape_y["middle"]) - 0.5)
+        coil_z = top + headrail_height / 2
+        for side in (-1, 1):
+            for rail, carrier_top in (("middle", mid_top), ("bottom", bottom_raise + rh)):
+                x = side * (chan_x + tape_dx[rail])  # inboard for the middle rail, outboard for the bottom
+                y = tape_y[rail]
+                coil_y = y + spring_r if rail == "middle" else y - spring_r
+                springs.append(Pos(x, coil_y, coil_z) * Rot(0, 90, 0) * Cylinder(spring_r, coil_w))
+                tapes.append(Pos(x, y, carrier_top) * Box(min(tape_width, coil_w), 0.4, coil_z - carrier_top, align=C_MIN))
+
+    else:
+        # Each channel splits in two: carriers ride in the inner half, belts run
+        # in the outer half. Positions across the channel are `u`, measured
+        # outwards from the channel centre line.
+        half = inner_cw / 2
+        bw = min(belt_width, half - 1)
+        belt_u = half / 2 + 0.25
+        pr = pulley_diameter / 2
+        loop_y = {"middle": -(inner_d / 2 - pr - 1), "bottom": inner_d / 2 - pr - 1}
+        pz = top + headrail_height / 2  # pulley and shaft height
+        idler_z = pr + 3
+        shaft_r = 2.5
+        # The motors sit on their own shafts, so each must clear the other rail's shaft.
+        msize = min(motor_size, headrail_height - 2 * wall - 1, 2 * (2 * abs(loop_y["middle"]) - shaft_r - 0.5))
+        shaft_x = chan_x + belt_u
+        for rail, motor_x in (("middle", -W / 4), ("bottom", W / 4)):
+            yc = loop_y[rail]
+            drive.append(Pos(0, yc, pz) * Rot(0, 90, 0) * Cylinder(shaft_r, 2 * shaft_x + bw + 2))
+            body = Pos(motor_x, yc, pz) * Box(motor_length * 0.55, msize, msize)
+            gear = Pos(motor_x + motor_length * 0.5, yc, pz) * Rot(0, 90, 0) * Cylinder(msize * 0.45, motor_length * 0.45)
+            drive.extend([body, gear])
+            for side in (-1, 1):
+                x = side * shaft_x
+                drive.append(Pos(x, yc, pz) * Rot(0, 90, 0) * Cylinder(pr, bw + 2))  # pulley
+                drive.append(Pos(x, yc, idler_z) * Rot(0, 90, 0) * Cylinder(pr, bw + 2))  # idler
+                for dy in (-pr, pr):  # the two strands of the loop
+                    belts.append(Pos(x, yc + dy, idler_z) * Box(bw, 1.5, pz - idler_z, align=C_MIN))
+        # Controller on the back wall of the headrail.
+        drive.append(Pos(0, headrail_depth / 2 - wall - 3, top + wall + 2) * Box(60, 4, min(25, headrail_height - 2 * wall - 4), align=C_MIN))
 
     # ---------------- rails with end carriers ----------------
-    def rail(z_bottom: float, carrier_y: float, carrier_d: float):
+    def rail(z_bottom: float, carrier_y: float, carrier_d: float, clamp_y: float | None = None):
         body = Pos(0, 0, z_bottom) * Box(inner_w, rd, rh, align=C_MIN)
         body = fillet(body.edges().filter_by(Axis.X).group_by(Axis.Y)[0], min(4, rh / 4))
         for side in (-1, 1):
-            # Tongue through the slot, then a carrier block inside the channel with friction pads.
+            # Tongue through the slot, then a carrier block inside the channel.
             body += Pos(side * (inner_w / 2 + wall), 0, z_bottom + rh / 2) * Box(wall * 2 + 2, slot_width - 1, rh * 0.6)
-            body += Pos(side * chan_x, carrier_y, z_bottom) * Box(cw - 2 * wall - 1, carrier_d, rh, align=C_MIN)
+            if clamp_y is None:  # spring version: carrier fills the channel width, with friction pads
+                body += Pos(side * chan_x, carrier_y, z_bottom) * Box(cw - 2 * wall - 1, carrier_d, rh, align=C_MIN)
+            else:  # motor version: carrier in the inner half, plus an arm that clamps its belt strand
+                cwid = inner_cw / 2 - 1
+                body += Pos(side * (chan_x - inner_cw / 4 - 0.25), carrier_y, z_bottom) * Box(cwid, carrier_d, rh, align=C_MIN)
+                arm_len = inner_cw / 2 + 0.5
+                # The arm sits on the inner face of the strand, so it stays clear of the channel wall.
+                arm_y = clamp_y + (1 if clamp_y < 0 else -1)
+                body += Pos(side * (chan_x + arm_len / 2 - 1), arm_y, z_bottom + rh - 8) * Box(arm_len, 3, 8, align=C_MIN)
         if handle_length > 0:
             body += Pos(0, -rd / 2 - 4, z_bottom + rh / 2) * Box(handle_length, 8, rh * 0.35)
         return body
 
-    # Middle carrier stays in the front of the channel so the bottom rail's tape passes behind it.
-    inner_d = cd - 2 * wall - 1
-    middle = rail(z0, -inner_d * 0.2, inner_d * 0.55)
-    bottom = rail(bottom_raise, 0, inner_d)
+    if not motor_on:
+        # Middle carrier stays in the front of the channel so the bottom rail's tape passes behind it.
+        cd_in = inner_d - 1
+        middle = rail(z0, -cd_in * 0.2, cd_in * 0.55)
+        bottom = rail(bottom_raise, 0, cd_in)
+    else:
+        # Each carrier clamps the outer strand of its own loop: front for the middle rail, back for the bottom.
+        middle = rail(z0, 0, inner_d - 1, clamp_y=loop_y["middle"] - pr)
+        bottom = rail(bottom_raise, 0, inner_d - 1, clamp_y=loop_y["bottom"] + pr)
 
     # ---------------- battens with pins into the channels ----------------
     batten_y = ft + bt / 2  # just behind the fabric, inside its pocket
@@ -171,8 +241,12 @@ def build(
         name="roman_shade",
         parts=[
             Part("headrail", head, color="#d7dbe0", explode=(0, 0, headrail_height * 3), material="Aluminium or printed PETG"),
-            Part("springs", Compound(springs + tapes), color="#8f99a6", explode=(0, 0, headrail_height * 3),
-                 material="Constant-force springs (steel tape)"),
+            *([Part("springs", Compound(springs + tapes), color="#8f99a6", explode=(0, 0, headrail_height * 3),
+                    material="Constant-force springs (steel tape)")] if not motor_on else [
+               Part("drive", Compound(drive), color="#5b6470", explode=(0, 0, headrail_height * 3),
+                    material="2x geared stepper, 6 mm shafts, GT2 pulleys and idlers, ESP32 + TMC2209"),
+               Part("belts", Compound(belts), color="#c9772b", explode=(0, 0, 0), material="GT2 timing belt"),
+            ]),
             Part("channels", channels, color="#c3c9d1", explode=(0, 0, 0), material="Aluminium or printed PETG"),
             Part("middle_rail", middle, color="#4f7cac", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
             Part("bottom_rail", bottom, color="#3d5f86", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
@@ -187,7 +261,11 @@ def build(
         notes=(
             f"{n_folds} folds of {pitch:.0f} mm, {n_battens} battens. "
             + ("Shade fully closed. " if open_gap and top_drop == 0 and bottom_raise == 0 else "")
-            + "No lift cords: rails are carried by constant-force springs inside the channels and held by friction pads."
+            + (
+                "No lift cords: rails are carried by constant-force springs inside the channels and held by friction pads."
+                if not motor_on
+                else "Motorized: each rail is driven at both ends by belts inside the channels; the geared motors hold it with the power off."
+            )
         ),
     )
 

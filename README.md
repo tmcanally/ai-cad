@@ -107,7 +107,7 @@ src/aicad/
   mcp_server.py          MCP server for Claude
   cli.py                 `aicad` command
   models/hinged_box.py   demo assembly (hinge joint)
-  models/roman_shade.py  cordless top-down/bottom-up Roman shade (motions that rebuild)
+  models/roman_shade.py  top-down/bottom-up Roman shade, spring or motorized (motions that rebuild)
   viewer/                three.js viewer
 designs/                 designs you or Claude create
 tests/
