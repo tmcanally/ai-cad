@@ -7,11 +7,11 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from aicad import export, registry, state
+from aicad import export, history, registry, state
 
 VIEWER_DIR = Path(__file__).resolve().parent / "viewer"
 
@@ -57,8 +57,59 @@ def api_design(name: str, request: Request) -> JSONResponse:
     design, resolved = _build(name, _params_from_query(request))
     payload = design.to_viewer_json()
     payload["params"] = resolved
-    payload["info"] = registry.get_info(name).to_dict()
+    info = registry.get_info(name)
+    payload["info"] = info.to_dict()
+    payload["saved_params"] = registry.resolve_params(info, registry.saved_params(info))
     return JSONResponse(payload)
+
+
+# ---------- history and saved values (the same operations Claude has over MCP) ----------
+
+
+def _changed(name: str, meta: dict[str, Any]) -> dict[str, Any]:
+    """Tell the viewer (and any other open viewer) what is current now."""
+    _, resolved = _build(name, {})
+    st = state.set_current(name, resolved)
+    return {"version": meta["version"], "note": meta.get("note", ""), "params": resolved, "state_version": st["version"]}
+
+
+def _history_call(fn, *args):
+    try:
+        return fn(*args)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc).strip("'\"")) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/designs/{name}/versions")
+def api_versions(name: str) -> list[dict[str, Any]]:
+    _history_call(registry.get_path, name)
+    return list(reversed(history.list_versions(name)))
+
+
+@app.post("/api/designs/{name}/params")
+def api_save_params(name: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    params = body.get("params")
+    if not isinstance(params, dict):
+        raise HTTPException(400, "Body must be {\"params\": {...}}")
+    meta = _history_call(history.save_params, name, params, body.get("note", ""))
+    return _changed(name, meta)
+
+
+@app.delete("/api/designs/{name}/params")
+def api_clear_params(name: str) -> dict[str, Any]:
+    return _changed(name, _history_call(history.clear_params, name))
+
+
+@app.post("/api/designs/{name}/restore/{version}")
+def api_restore(name: str, version: int) -> dict[str, Any]:
+    return _changed(name, _history_call(history.restore, name, version))
+
+
+@app.post("/api/designs/{name}/undo")
+def api_undo(name: str) -> dict[str, Any]:
+    return _changed(name, _history_call(history.undo, name))
 
 
 @app.get("/api/designs/{name}/stl")

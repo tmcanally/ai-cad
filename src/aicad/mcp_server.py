@@ -14,7 +14,7 @@ from typing import Any
 
 from mcp.server import MCPServer
 
-from aicad import export, registry, state
+from aicad import checks, export, history, registry, state
 
 VIEWER_URL = os.environ.get("AICAD_VIEWER_URL", "http://127.0.0.1:8765")
 
@@ -41,6 +41,26 @@ Rules:
   RigidJoint on the child, then joint.connect_to(child_joint, angle=0) to place it,
   and add Motion.from_revolute_joint("name", joint, parts=["child"]).
 - See the built-in `hinged_box` (read_design_source) for a full example.
+
+Keep it fully parametric:
+- Every size, gap, thickness, hole, count or angle a person might want to change
+  is a Param with a plain-words description, a sensible min/max and a unit, and
+  build() derives everything else from those. Name params after what the person
+  would call them ("inner_height", "screw_diameter"), not after code.
+- write_design returns `warnings` from a parameter check (PARAMS vs build()
+  arguments, bare numbers in build()). Fix them unless they are ratios or tolerances.
+
+The design loop with a person:
+1. They describe an object. Ask at most one question if something essential is
+   missing (e.g. the size of the thing it must fit); otherwise pick sensible values,
+   write the design, and tell them which parameters it has.
+2. "Make it taller", "5 mm wider", "M3 screws": a value change. Use set_params,
+   which saves the values so they survive reloads and later rewrites. Use
+   build_design only to preview values without keeping them.
+3. "Add mounting tabs", "round the corners": a shape change. read_design_source,
+   edit it, and write_design with a short `note` saying what changed. New
+   dimensions become new Params. Saved values carry over.
+4. "Go back", "undo that": undo_design, or list_versions and restore_version.
 '''
 
 mcp = MCPServer(
@@ -48,7 +68,8 @@ mcp = MCPServer(
     instructions=(
         "AI CAD: parametric CAD on build123d with a live 3D viewer at "
         f"{VIEWER_URL}. Use list_designs, read_design_source, write_design, "
-        "build_design and export_stl.\n" + DESIGN_CONTRACT
+        "set_params, build_design, undo_design, list_versions, restore_version "
+        "and export_stl.\n" + DESIGN_CONTRACT
     ),
 )
 
@@ -76,25 +97,85 @@ def read_design_source(name: str) -> str:
 
 
 @mcp.tool()
-def write_design(name: str, source: str) -> dict[str, Any]:
+def write_design(name: str, source: str, note: str = "") -> dict[str, Any]:
     """Save a design file to designs/<name>.py, build it to check it, and show it in the viewer.
 
     `name` is lower_snake_case. `source` is the full Python file; see the server
-    instructions for the required shape. Returns a summary, or the error and
-    traceback if the build failed (the file is kept so you can fix it).
+    instructions for the required shape. `note` says in a few words what changed
+    ("added wall-mount tabs"); it labels this version in the history.
+
+    Saved parameter values (from set_params or the viewer) still apply after a
+    rewrite, for every parameter the new source still has.
+
+    Returns a summary with `version` and parameter-check `warnings`, or the error
+    and traceback if the build failed (the file is kept so you can fix it, and no
+    version is recorded until it builds).
     """
+    history.ensure_baseline(name)
     path = registry.save_design(name, source)
     try:
         result = _summary(name, None)
-        result["saved_to"] = str(path)
-        return result
     except Exception as exc:
         return {"saved_to": str(path), "error": str(exc), "traceback": traceback.format_exc(limit=8)}
+    result["saved_to"] = str(path)
+    result["warnings"] = checks.check_module(registry._load_module(name, path), source)
+    result["version"] = history.snapshot(name, note or "Wrote design")["version"]
+    return result
+
+
+@mcp.tool()
+def set_params(name: str, params: dict[str, float], note: str = "") -> dict[str, Any]:
+    """Change parameter values and keep them: rebuilds, shows the result, and records a version.
+
+    Use this when the person asks for a different size or count ("make it 10 mm
+    taller"). Only the parameters you pass change; others keep their saved values.
+    """
+    try:
+        version = history.save_params(name, params, note)
+        result = _summary(name, None)
+    except Exception as exc:
+        return {"error": str(exc), "traceback": traceback.format_exc(limit=8)}
+    result["version"] = version["version"]
+    return result
+
+
+@mcp.tool()
+def list_versions(name: str) -> list[dict[str, Any]]:
+    """The design's history, oldest first: version number, time, what changed, and the saved values."""
+    return history.list_versions(name)
+
+
+@mcp.tool()
+def restore_version(name: str, version: int) -> dict[str, Any]:
+    """Bring back an earlier version (its source and its saved values). Recorded as a new version."""
+    try:
+        meta = history.restore(name, version)
+        result = _summary(name, None)
+    except Exception as exc:
+        return {"error": str(exc)}
+    result["version"] = meta["version"]
+    result["restored"] = meta["note"]
+    return result
+
+
+@mcp.tool()
+def undo_design(name: str) -> dict[str, Any]:
+    """Step back to the version before the current one. Calling it again keeps stepping back."""
+    try:
+        meta = history.undo(name)
+        result = _summary(name, None)
+    except Exception as exc:
+        return {"error": str(exc)}
+    result["version"] = meta["version"]
+    result["restored"] = meta["note"]
+    return result
 
 
 @mcp.tool()
 def build_design(name: str, params: dict[str, float] | None = None) -> dict[str, Any]:
-    """Build a design with optional parameter overrides and show it in the viewer.
+    """Preview a design with optional parameter overrides and show it in the viewer, without saving them.
+
+    To keep new values, use set_params instead.
 
     Returns each part's size, volume and validity, the joint motions, and the viewer URL.
     """

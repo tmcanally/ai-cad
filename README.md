@@ -40,8 +40,11 @@ Keep the viewer open (`uv run aicad serve --open`) and ask, for example, *"Make 
 |---|---|
 | `list_designs` | Designs and their parameters |
 | `read_design_source` | The Python for a design, to learn from or modify |
-| `write_design` | Save a new design to `designs/<name>.py`, build it, show it in the viewer, and return errors if it fails |
-| `build_design` | Rebuild with new parameters; returns sizes, volumes and validity |
+| `write_design` | Save a new design to `designs/<name>.py` with a note on what changed, build it, show it in the viewer, and return errors and parameter-check warnings |
+| `set_params` | Change parameter values and keep them (recorded as a version) |
+| `build_design` | Preview other parameter values without saving them; returns sizes, volumes and validity |
+| `undo_design` | Step back one version; repeat to keep going back |
+| `list_versions` / `restore_version` | See a design's history and bring back any version |
 | `export_stl` | One STL per part, into `exports/<name>/` |
 
 ## Command line
@@ -58,9 +61,19 @@ uv run pytest                                         # tests
 - **Explode**: slides each part along its own explode offset.
 - **Motion**: one slider per joint, plus **Play** to swing every joint through its range.
 - **Parts**: show or hide each part, download its STL, or download all of them as a zip.
-- **Parameters**: change numbers and rebuild.
+- **Parameters**: change a number and the model rebuilds straight away. **Save values** keeps them; **Revert** goes back to the saved ones.
+- **History**: every change, from Claude or from you, is a numbered version with a note. **Undo** steps back, and **Restore** brings back any version.
 
 three.js is vendored in `src/aicad/viewer/vendor/`, so the viewer works offline.
+
+## Describe, look, refine
+
+1. Tell Claude what you want: *"A box for an ESP32 board, 55 × 28 mm, screw-down lid, USB-C hole in one end, vents in the lid."* Claude writes a design where every size is a named parameter, and the viewer shows it.
+2. Change sizes by saying so (*"10 mm taller, fit a 70 mm board"*) or by typing in the Parameters panel and pressing **Save values**.
+3. Change the shape by saying so (*"add tabs to screw it to a wall"*). Claude edits the design, adds parameters for anything new, and your saved values carry over.
+4. *"Undo that"* or the **Undo** button steps back.
+
+History is kept in `designs/.history/<name>/`, and saved values in `designs/<name>.params.json`, which override the defaults written in the design file.
 
 ## Writing a design
 
@@ -88,6 +101,8 @@ src/aicad/
   design.py              Design / Part / Motion / Param, tessellation for the viewer
   registry.py            finds and builds designs (reloads files when they change)
   export.py              STL export (DXF/SVG next)
+  history.py             versions, undo and saved parameter values
+  checks.py              parameter check run on every design Claude writes
   server.py              FastAPI app: viewer + JSON API
   mcp_server.py          MCP server for Claude
   cli.py                 `aicad` command

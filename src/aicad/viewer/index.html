@@ -56,13 +56,25 @@
         <a id="download-all" class="button" href="#">Download all STLs (.zip)</a>
       </section>
 
-      <section>
+      <section id="params-section">
         <div class="section-title row">
           <span>Parameters</span>
-          <button id="reset-params" class="small ghost">Reset</button>
+          <span id="unsaved" class="badge" hidden>Not saved</span>
         </div>
         <form id="params"></form>
-        <button id="rebuild" form="params" type="submit">Rebuild</button>
+        <div class="button-row">
+          <button id="save-params" type="button" disabled>Save values</button>
+          <button id="revert-params" type="button" class="ghost" disabled title="Back to the saved values">Revert</button>
+        </div>
+      </section>
+
+      <section id="history-section">
+        <div class="section-title row">
+          <span>History</span>
+          <button id="undo" class="small ghost" title="Step back to the previous version">↶ Undo</button>
+        </div>
+        <ol id="versions"></ol>
+        <button id="more-versions" class="small ghost" hidden>Show all</button>
       </section>
 
       <section>

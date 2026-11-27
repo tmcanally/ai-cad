@@ -68,6 +68,20 @@ async function fetchJSON(url) {
   return res.json();
 }
 
+async function sendJSON(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).detail || msg; } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
 function paramsQuery(params) {
   return params && Object.keys(params).length ? `?params=${encodeURIComponent(JSON.stringify(params))}` : "";
 }
@@ -221,7 +235,72 @@ function renderPanel() {
     label.appendChild(input);
     form.appendChild(label);
   }
-  $("rebuild").style.display = Object.keys(info.params).length ? "" : "none";
+  $("params-section").style.display = Object.keys(info.params).length ? "" : "none";
+  markUnsaved();
+  renderHistory();
+}
+
+// ---------- saved values and history ----------
+function formParams() {
+  const params = {};
+  for (const input of $("params").querySelectorAll("input")) params[input.name] = +input.value;
+  return params;
+}
+
+function markUnsaved() {
+  if (!current) return;
+  const saved = current.data.saved_params || {};
+  let dirty = false;
+  for (const input of $("params").querySelectorAll("input")) {
+    const changed = saved[input.name] !== undefined && +input.value !== saved[input.name];
+    input.classList.toggle("changed", changed);
+    dirty ||= changed;
+  }
+  $("unsaved").hidden = !dirty;
+  $("save-params").disabled = !dirty;
+  $("revert-params").disabled = !dirty;
+}
+
+let showAllVersions = false;
+async function renderHistory() {
+  if (!current) return;
+  const name = current.name;
+  let versions = [];
+  try { versions = await fetchJSON(`/api/designs/${encodeURIComponent(name)}/versions`); } catch {}
+  if (!current || current.name !== name) return;
+  const ol = $("versions");
+  ol.innerHTML = "";
+  const shown = showAllVersions ? versions : versions.slice(0, 6);
+  shown.forEach((v, i) => {
+    const li = document.createElement("li");
+    const when = new Date(v.time.replace(/([+-]\d\d)(\d\d)$/, "$1:$2"));
+    const time = isNaN(when) ? v.time : when.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    li.innerHTML = `<span class="vnum">v${v.version}</span>
+      <span class="vnote"></span>
+      ${i === 0 ? '<span class="current">current</span>' : '<button class="ghost">Restore</button>'}`;
+    const note = li.querySelector(".vnote");
+    note.textContent = v.note || "(no note)";
+    const t = document.createElement("span");
+    t.className = "vtime";
+    t.textContent = time;
+    note.appendChild(t);
+    li.querySelector("button")?.addEventListener("click", () => historyAction("POST", `restore/${v.version}`, `Restoring v${v.version}…`));
+    ol.appendChild(li);
+  });
+  $("more-versions").hidden = showAllVersions || versions.length <= 6;
+  $("undo").disabled = versions.length < 2 || (versions[0].restored_from ?? versions[0].version) <= 1;
+}
+
+async function historyAction(method, path, message, body) {
+  if (!current) return;
+  setStatus(message);
+  try {
+    const res = await sendJSON(method, `/api/designs/${encodeURIComponent(current.name)}/${path}`, body);
+    lastStateVersion = res.state_version; // our own change; don't reload twice via Follow
+    await loadDesign(current.name, {}, { keepView: true });
+  } catch (err) {
+    setStatus(err.message, true);
+  }
 }
 
 async function loadDesign(name, params = {}, { keepView = false } = {}) {
@@ -279,13 +358,21 @@ function stepPlay(now) {
 }
 
 $("design-select").addEventListener("change", (ev) => loadDesign(ev.target.value));
+// Editing a value previews it straight away; "Save values" keeps it.
 $("params").addEventListener("submit", (ev) => {
   ev.preventDefault();
-  const params = {};
-  for (const input of ev.target.querySelectorAll("input")) params[input.name] = +input.value;
-  loadDesign(current.name, params, { keepView: true });
+  loadDesign(current.name, formParams(), { keepView: true });
 });
-$("reset-params").addEventListener("click", () => current && loadDesign(current.name, {}, { keepView: true }));
+$("params").addEventListener("input", markUnsaved);
+$("params").addEventListener("change", () => loadDesign(current.name, formParams(), { keepView: true }));
+$("save-params").addEventListener("click", () => {
+  const saved = current.data.saved_params || {};
+  const changed = Object.fromEntries(Object.entries(formParams()).filter(([k, v]) => v !== saved[k]));
+  historyAction("POST", "params", "Saving…", { params: changed });
+});
+$("revert-params").addEventListener("click", () => current && loadDesign(current.name, {}, { keepView: true }));
+$("undo").addEventListener("click", () => historyAction("POST", "undo", "Undoing…"));
+$("more-versions").addEventListener("click", () => { showAllVersions = true; renderHistory(); });
 
 // Follow Claude: reload when the MCP server builds something.
 async function pollCurrent() {

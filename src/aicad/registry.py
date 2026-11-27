@@ -135,11 +135,22 @@ def resolve_params(info: DesignInfo, params: dict[str, Any] | None) -> dict[str,
 _cache: dict[tuple, Design] = {}
 
 
+def saved_params(info: DesignInfo) -> dict[str, float]:
+    """Values saved for this design (see aicad.history), limited to parameters it still has."""
+    from aicad.history import load_saved_params
+
+    saved = load_saved_params(info.name)
+    return {k: v for k, v in saved.items() if k in info.params}
+
+
 def build(name: str, params: dict[str, Any] | None = None) -> tuple[Design, dict[str, float]]:
-    """Build a design, caching by (name, params, file modification time)."""
+    """Build a design, caching by (name, params, file modification time).
+
+    Parameters not given fall back to the saved values, then to the design's defaults.
+    """
     path, _ = get_path(name)
     info = get_info(name)
-    resolved = resolve_params(info, params)
+    resolved = resolve_params(info, {**saved_params(info), **(params or {})})
     key = (name, path.stat().st_mtime_ns, tuple(sorted(resolved.items())))
     if key not in _cache:
         module = _load_module(name, path)
