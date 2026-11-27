@@ -524,5 +524,22 @@ window.aicad = {
   loadDesign,
   // For scripted screenshots: camera position and look-at point in mm.
   setView: (position, target) => { camera.position.set(...position); controls.target.set(...target); controls.update(); },
+  // Screen position (CSS pixels within the 3D view) of model points, for labelling screenshots.
+  project: (points) => {
+    controls.update();
+    camera.updateMatrixWorld();
+    const { clientWidth: w, clientHeight: h } = canvas;
+    return points.map((p) => {
+      const v = new THREE.Vector3(...p).project(camera);
+      return [((v.x + 1) / 2) * w, ((1 - v.y) / 2) * h];
+    });
+  },
+  // Where a part is drawn right now (after explode and motion), so labels can follow it.
+  partCenter: (name) => {
+    const obj = partObjects.get(name);
+    if (!obj) return null;
+    const box = new THREE.Box3().setFromObject(obj.group);
+    return box.getCenter(new THREE.Vector3()).toArray();
+  },
   setExplode: (v) => { $("explode").value = v; $("explode").dispatchEvent(new Event("input")); } };
 init();

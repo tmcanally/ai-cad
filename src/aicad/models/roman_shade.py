@@ -179,6 +179,8 @@ def build(
     inner_d = cd - 2 * wall
     springs, tapes = [], []
     drive, belts = [], []
+    mounts: list[tuple[str, object]] = []  # printed brackets: (name, shape)
+    head_holes, channel_holes = [], []
     if not motor_on:
         # Each channel has two springs, one per rail. A coil's axis runs across the
         # window; its tape leaves the coil tangentially and drops straight down the
@@ -219,20 +221,76 @@ def build(
         # The motors sit on their own shafts, so each must clear the other rail's shaft.
         msize = min(motor_size, headrail_height - 2 * wall - 1, 2 * (2 * abs(loop_y["middle"]) - shaft_r - 0.5))
         shaft_x = chan_x + belt_u
+        wheel_w = bw + 1  # pulley and idler width
+        bh_t = 4  # bulkhead thickness
+        ceiling = top + headrail_height - wall
+        # A bulkhead is a plate shaped like the inside of the headrail: it slides in
+        # and is held by a screw through the thick back wall into its edge.
+        bh_y0, bh_y1 = head_front + 0.3, head_back - 0.3
+        bh_z0, bh_z1 = pz - msize / 2 - 3, ceiling - 0.3
+
+        def bulkhead(x: float, holes):
+            plate = Pos(x, (bh_y0 + bh_y1) / 2, (bh_z0 + bh_z1) / 2) * Box(bh_t, bh_y1 - bh_y0, bh_z1 - bh_z0)
+            for hy, hz, hr in holes:
+                plate -= Pos(x, hy, hz) * Rot(0, 90, 0) * Cylinder(hr, bh_t * 3)
+            # Pilot hole for the screw that comes in through the back wall.
+            screw_z = (bh_z0 + bh_z1) / 2 + 4
+            plate -= Pos(x, bh_y1 - 5, screw_z) * Rot(90, 0, 0) * Cylinder(1.25, 12)
+            head_holes.append(Pos(x, headrail_depth / 2 - mw / 2, screw_z) * Rot(90, 0, 0) * Cylinder(screw_hole / 2 - 0.4, mw * 3))
+            return plate
+
         for rail, motor_x in (("middle", -W / 4), ("bottom", W / 4)):
             yc = loop_y[rail]
-            drive.append(Pos(0, yc, pz) * Rot(0, 90, 0) * Cylinder(shaft_r, 2 * shaft_x + bw + 2))
+            drive.append(Pos(0, yc, pz) * Rot(0, 90, 0) * Cylinder(shaft_r, 2 * shaft_x + wheel_w))
             body = Pos(motor_x, yc, pz) * Box(motor_length * 0.55, msize, msize)
             gear = Pos(motor_x + motor_length * 0.5, yc, pz) * Rot(0, 90, 0) * Cylinder(msize * 0.45, motor_length * 0.45)
             drive.extend([body, gear])
+            # Motor bulkhead: bolted to the gearbox face; the other rail's shaft passes through a clearance hole.
+            face_x = motor_x + motor_length * 0.725 + bh_t / 2
+            mounts.append((f"motor_mount_{rail}", bulkhead(face_x, [
+                (yc, pz, shaft_r + 1),  # output shaft
+                (yc, pz + msize * 0.35, 1.2), (yc, pz - msize * 0.35, 1.2),  # M2 screws into the gearbox
+                (-yc, pz, shaft_r + 1.5),  # the other shaft runs through untouched
+            ])))
             for side in (-1, 1):
                 x = side * shaft_x
-                drive.append(Pos(x, yc, pz) * Rot(0, 90, 0) * Cylinder(pr, bw + 2))  # pulley
-                drive.append(Pos(x, yc, idler_z) * Rot(0, 90, 0) * Cylinder(pr, bw + 2))  # idler
+                drive.append(Pos(x, yc, pz) * Rot(0, 90, 0) * Cylinder(pr, wheel_w))  # pulley
+                drive.append(Pos(x, yc, idler_z) * Rot(0, 90, 0) * Cylinder(pr, wheel_w))  # idler
+                # M3 axle screw from outside the frame-side wall to the far face of the idler bracket
+                # (drawn at its thread's core diameter).
+                axle_len = W / 2 - chan_x + 1
+                drive.append(Pos(side * (W / 2 - axle_len / 2), yc, idler_z) * Rot(0, 90, 0) * Cylinder(1.25, axle_len))
+                channel_holes.append(Pos(side * (W / 2 - mw / 2), yc, idler_z) * Rot(0, 90, 0) * Cylinder(1.7, mw * 3))
+                # Counterbore so the screw head sits flush against the window frame.
+                channel_holes.append(Pos(side * (W / 2 - 1), yc, idler_z) * Rot(0, 90, 0) * Cylinder(3.25, 2.02))
                 for dy in (-pr, pr):  # the two strands of the loop
                     belts.append(Pos(x, yc + dy, idler_z) * Box(bw, 1.5, pz - idler_z, align=C_MIN))
+        for side in (-1, 1):
+            # Shaft bulkheads just inboard of the pulleys: plain bushing holes for both shafts.
+            x = side * (shaft_x - wheel_w / 2 - 1 - bh_t / 2)
+            mounts.append((f"shaft_mount_{'left' if side < 0 else 'right'}", bulkhead(x, [
+                (loop_y["middle"], pz, shaft_r + 0.2), (loop_y["bottom"], pz, shaft_r + 0.2),
+            ])))
+            # Idler bracket: a plate down the middle of the channel bottom. The M3 axle screws come
+            # in through the frame-side wall, through the idlers, and thread into this plate.
+            plate_h = idler_z + pr + 2
+            plate = Pos(side * (chan_x + 0.0), 0, 0) * Box(2, inner_d - 0.4, plate_h, align=C_MIN)
+            for rail in ("middle", "bottom"):
+                plate -= Pos(side * chan_x, loop_y[rail], idler_z) * Rot(0, 90, 0) * Cylinder(1.25, 10)
+            mounts.append((f"idler_mount_{'left' if side < 0 else 'right'}", plate))
         # Controller on the back wall of the headrail.
         drive.append(Pos(0, head_back - 3, top + wall + 2) * Box(60, 4, min(25, headrail_height - 2 * wall - 4), align=C_MIN))
+
+    # Screw holes for the mounts: through the headrail's back wall and the channels' frame-side wall.
+    for h in head_holes:
+        head = head - h
+    for h in channel_holes:
+        if h.bounding_box().center().X < 0:
+            channel_l = channel_l - h
+        else:
+            channel_r = channel_r - h
+    if channel_holes:
+        channels = channel_l + channel_r
 
     # ---------------- rails with end carriers ----------------
     def rail(z_bottom: float, carrier_y: float, carrier_d: float, clamp_y: float | None = None):
@@ -244,12 +302,13 @@ def build(
             if clamp_y is None:  # spring version: carrier fills the channel width, with friction pads
                 body += Pos(side * chan_x, carrier_y, z_bottom) * Box(inner_cw - 1, carrier_d, rh, align=C_MIN)
             else:  # motor version: carrier in the inner half, plus an arm that clamps its belt strand
-                cwid = inner_cw / 2 - 1
-                body += Pos(side * (chan_x - inner_cw / 4 - 0.25), carrier_y, z_bottom) * Box(cwid, carrier_d, rh, align=C_MIN)
-                arm_len = inner_cw / 2 + 0.5
+                # Leaves the channel's centre line free for the idler bracket at the bottom.
+                cwid = inner_cw / 2 - 1.75
+                body += Pos(side * (chan_x - inner_cw / 4 - 0.625), carrier_y, z_bottom) * Box(cwid, carrier_d, rh, align=C_MIN)
+                arm_len = inner_cw / 2 + 2  # from the carrier, across the centre line, to the strand
                 # The arm sits on the inner face of the strand, so it stays clear of the channel wall.
                 arm_y = clamp_y + (1 if clamp_y < 0 else -1)
-                body += Pos(side * (chan_x + arm_len / 2 - 1), arm_y, z_bottom + rh - 8) * Box(arm_len, 3, 8, align=C_MIN)
+                body += Pos(side * (chan_x + arm_len / 2 - 2.5), arm_y, z_bottom + rh - 8) * Box(arm_len, 3, 8, align=C_MIN)
         if handle_length > 0:
             body += Pos(0, -rd / 2 - 4, z_bottom + rh / 2) * Box(handle_length, 8, rh * 0.35)
         return body
@@ -300,14 +359,24 @@ def build(
              material=f"Buy: {n_battens} x {bt:g} mm dowels, {W - 2 * mw - 2:.0f} mm long"),
     ]
 
+    mount_colors = {"motor": "#7fb069", "shaft": "#e6aa68", "idler": "#c97b84"}
+    mount_parts = [
+        Part(name, shape, color=mount_colors[name.split("_")[0]],
+             explode=(0, -headrail_depth * 2, headrail_height * 3) if not name.startswith("idler") else (0, -cd * 3, 0),
+             material=PRINT)
+        for name, shape in mounts
+    ]
+    if motor_on:
+        notes += " Hardware: 4 M3x16 screws (idler axles), 4 M2x6 (motor to bulkhead), 4 M3x10 (bulkheads, through the headrail back)."
+
     if print_pieces < 0.5:
         return Design(
             name="roman_shade",
             parts=[
                 Part("headrail", head, color="#d7dbe0", explode=(0, 0, headrail_height * 3), material="Aluminium or printed PETG"),
-                bought[0] if not motor_on else bought[0],
-                *(bought[1:2] if motor_on else []),
+                *bought[:-2],
                 Part("channels", channels, color="#c3c9d1", explode=(0, 0, 0), material="Aluminium or printed PETG"),
+                *mount_parts,
                 Part("middle_rail", middle, color="#4f7cac", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
                 Part("bottom_rail", bottom, color="#3d5f86", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
                 *bought[-2:],
@@ -395,13 +464,16 @@ def build(
         name="roman_shade",
         parts=[
             *printed,
+            *mount_parts,
             *pin_parts,
             *bought,
         ],
         motions=motions,
         notes=(
             f"{len(printed)} printed pieces, longest {longest:.0f} mm (print standing up), "
-            f"joined with {pin_count} filament pins. " + notes
+            f"joined with {pin_count} filament pins. "
+            + (f"Plus {len(mount_parts)} printed mounts (print flat). " if mount_parts else "")
+            + notes
         ),
     )
 

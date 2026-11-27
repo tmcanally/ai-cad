@@ -146,9 +146,11 @@ M5_BED = (235, 235, 250)  # AnkerMake M5 build volume, mm
 def test_print_pieces_fit_the_printer_and_pin_together(motorized):
     design, params = registry.build("roman_shade", {"print_pieces": 1, "motorized": motorized})
     printed = [p for p in design.parts if p.material.startswith("Print")]
-    assert {p.name.rsplit("_", 1)[0] for p in printed} == {
-        "headrail", "channel_left", "channel_right", "middle_rail", "bottom_rail"
-    }
+    groups = {p.name.rsplit("_", 1)[0] for p in printed}
+    expected = {"headrail", "channel_left", "channel_right", "middle_rail", "bottom_rail"}
+    if motorized:
+        expected |= {"motor_mount", "shaft_mount", "idler_mount"}
+    assert groups == expected
     for p in printed:
         assert p.shape.is_valid and len(p.shape.solids()) == 1, p.name
         dims = sorted(tuple(p.shape.bounding_box().size))
@@ -177,3 +179,34 @@ def test_print_pieces_add_up_to_the_assembled_parts():
         whole = assembled.part(name).shape.volume
         parts = sum(p.shape.volume for p in pieces.parts if p.name.startswith(name + "_"))
         assert parts == pytest.approx(whole, rel=0.02)  # only the pin and screw holes are missing
+
+
+@pytest.mark.parametrize("top_drop,bottom_raise", [(0, 0), (5000, 5000)])
+def test_motor_mounts_fit_and_clear_everything(top_drop, bottom_raise):
+    design, params = registry.build(
+        "roman_shade", {"motorized": 1, "top_drop": top_drop, "bottom_raise": bottom_raise}
+    )
+    mounts = [p for p in design.parts if "_mount_" in p.name]
+    assert len(mounts) == 6
+    drive = design.part("drive").shape.solids()
+    head = design.part("headrail").shape
+    chan = design.part("channels").shape
+    belts = design.part("belts").shape
+    rails = [design.part("middle_rail").shape, design.part("bottom_rail").shape]
+    shafts = [d for d in drive if d.bounding_box().size.X > params["window_width"] * 0.8]
+    for m in mounts:
+        dims = sorted(tuple(m.shape.bounding_box().size))
+        assert all(d <= b for d, b in zip(dims, sorted(M5_BED))), m.name
+        assert not _overlap(m.shape, head), m.name  # slides inside the headrail
+        assert not _overlap(m.shape, chan), m.name
+        assert not _overlap(m.shape, belts), m.name
+        for r in rails:
+            assert not _overlap(m.shape, r), m.name
+        for d in drive:  # shafts run through holes, motors bolt to the face, idlers spin beside
+            assert not _overlap(m.shape, d), m.name
+    # Each bulkhead in the headrail has both shafts passing through it.
+    for m in mounts:
+        if not m.name.startswith("idler"):
+            bb = m.shape.bounding_box()
+            through = [s for s in shafts if s.bounding_box().min.X < bb.min.X and bb.max.X < s.bounding_box().max.X]
+            assert len(through) == 2, m.name
