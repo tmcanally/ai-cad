@@ -157,7 +157,7 @@ def build(name: str, params: dict[str, Any] | None = None) -> tuple[Design, dict
         design = module.build(**resolved)
         if not isinstance(design, Design):
             raise TypeError(f"{name}.build() returned {type(design).__name__}, expected aicad.design.Design")
-        if len(_cache) > 32:
+        if len(_cache) > 256:  # room for every frame of an animated motion
             _cache.clear()
         _cache[key] = design
     return _cache[key], resolved

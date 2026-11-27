@@ -59,7 +59,7 @@ uv run pytest                                         # tests
 ## The viewer
 
 - **Explode**: slides each part along its own explode offset.
-- **Motion**: one slider per joint, plus **Play** to swing every joint through its range.
+- **Motion**: one slider per motion, plus **Play**. Hinges turn and sliders slide; motions that change shape (like fabric folding) rebuild the design along the way, and Play fetches those frames first.
 - **Parts**: show or hide each part, download its STL, or download all of them as a zip.
 - **Parameters**: change a number and the model rebuilds straight away. **Save values** keeps them; **Revert** goes back to the saved ones.
 - **History**: every change, from Claude or from you, is a numbered version with a note. **Undo** steps back, and **Restore** brings back any version.
@@ -91,7 +91,7 @@ def build(width=70) -> Design:
     return Design(name="phone_stand", parts=[Part("body", body, color="#4f7cac", material="PLA")])
 ```
 
-Units are millimetres and Z is up. For moving parts, use build123d joints: put a `RevoluteJoint` on the parent and a `RigidJoint` on the child, place the child with `joint.connect_to(child_joint, angle=0)`, and add `Motion.from_revolute_joint(...)` so the viewer can animate it. The [hinged box](src/aicad/models/hinged_box.py) shows the whole pattern, and its tests check that the viewer's animation matches the CAD joint and that the lid clears the base from 0° to 110°.
+Units are millimetres and Z is up. For moving parts, use build123d joints: put a `RevoluteJoint` on the parent and a `RigidJoint` on the child, place the child with `joint.connect_to(child_joint, angle=0)`, and add `Motion.from_revolute_joint(...)` so the viewer can animate it. Sliding parts use a `LinearJoint` and `Motion.from_linear_joint(...)`. When a motion changes shape rather than just moving parts, make the position a parameter and add `Motion.from_param("name", "param", (lo, hi))`: the [Roman shade](src/aicad/models/roman_shade.py) does this for its two rails, and its fabric folds are worked out by `build()` at every position. The [hinged box](src/aicad/models/hinged_box.py) shows the joint pattern, and its tests check that the viewer's animation matches the CAD joint and that the lid clears the base from 0° to 110°.
 
 ## Layout
 
@@ -106,7 +106,8 @@ src/aicad/
   server.py              FastAPI app: viewer + JSON API
   mcp_server.py          MCP server for Claude
   cli.py                 `aicad` command
-  models/hinged_box.py   demo assembly
+  models/hinged_box.py   demo assembly (hinge joint)
+  models/roman_shade.py  cordless top-down/bottom-up Roman shade (motions that rebuild)
   viewer/                three.js viewer
 designs/                 designs you or Claude create
 tests/

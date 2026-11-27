@@ -52,10 +52,20 @@ def api_current() -> JSONResponse:
     return JSONResponse(state.get_current() or {})
 
 
+_mesh_cache: dict[int, tuple[Any, dict[str, Any]]] = {}
+
+
 @app.get("/api/designs/{name}")
 def api_design(name: str, request: Request) -> JSONResponse:
     design, resolved = _build(name, _params_from_query(request))
-    payload = design.to_viewer_json()
+    # Tessellating is the slow part, so keep meshes for recently built designs
+    # (animated motions fetch the same frames again on every Play).
+    key = id(design)
+    if key not in _mesh_cache or _mesh_cache[key][0] is not design:
+        if len(_mesh_cache) > 256:
+            _mesh_cache.clear()
+        _mesh_cache[key] = (design, design.to_viewer_json())
+    payload = dict(_mesh_cache[key][1])
     payload["params"] = resolved
     info = registry.get_info(name)
     payload["info"] = info.to_dict()

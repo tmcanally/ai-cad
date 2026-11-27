@@ -40,6 +40,11 @@ Rules:
 - For moving parts, use build123d joints: a RevoluteJoint on the parent, a
   RigidJoint on the child, then joint.connect_to(child_joint, angle=0) to place it,
   and add Motion.from_revolute_joint("name", joint, parts=["child"]).
+- For sliding parts, a LinearJoint and Motion.from_linear_joint(...) work the same way.
+- When a motion changes shape rather than just position (fabric folding, several
+  parts moving by different rules), make the position a Param and add
+  Motion.from_param("name", "param_name", (lo, hi)); the viewer animates it by
+  rebuilding the design across that range. See the built-in `roman_shade`.
 - See the built-in `hinged_box` (read_design_source) for a full example.
 
 Keep it fully parametric:

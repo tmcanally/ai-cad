@@ -142,14 +142,18 @@ function updateTransforms() {
   for (const [name, obj] of partObjects) {
     const m = new THREE.Matrix4();
     for (const motion of current.data.motions) {
-      if (!motion.parts.includes(name) || motion.kind !== "revolute") continue;
-      const deg = motionValues.get(motion.name) ?? motion.range[0];
-      const o = new THREE.Vector3(...motion.origin);
+      if (!motion.parts.includes(name)) continue;
+      const value = motionValues.get(motion.name) ?? motion.range[0];
       const axis = new THREE.Vector3(...motion.direction).normalize();
-      const r = new THREE.Matrix4().makeTranslation(o.x, o.y, o.z)
-        .multiply(new THREE.Matrix4().makeRotationAxis(axis, THREE.MathUtils.degToRad(deg)))
-        .multiply(new THREE.Matrix4().makeTranslation(-o.x, -o.y, -o.z));
-      m.premultiply(r);
+      if (motion.kind === "revolute") {
+        const o = new THREE.Vector3(...motion.origin);
+        m.premultiply(new THREE.Matrix4().makeTranslation(o.x, o.y, o.z)
+          .multiply(new THREE.Matrix4().makeRotationAxis(axis, THREE.MathUtils.degToRad(value)))
+          .multiply(new THREE.Matrix4().makeTranslation(-o.x, -o.y, -o.z)));
+      } else if (motion.kind === "linear") {
+        const t = axis.multiplyScalar(value);
+        m.premultiply(new THREE.Matrix4().makeTranslation(t.x, t.y, t.z));
+      }
     }
     const e = obj.explode.clone().multiplyScalar(explode);
     m.premultiply(new THREE.Matrix4().makeTranslation(e.x, e.y, e.z));
@@ -186,18 +190,21 @@ function renderPanel() {
     const wrap = document.createElement("div");
     wrap.className = "motion";
     const [lo, hi] = m.range;
-    const v = motionValues.get(m.name) ?? lo;
+    const v = motionValue(m);
+    const step = m.kind === "revolute" ? 0.5 : Math.max((hi - lo) / 400, 0.1);
     wrap.innerHTML = `<div class="motion-name">${m.name.replace(/_/g, " ")}</div>
-      <div class="slider-row"><input type="range" min="${lo}" max="${hi}" step="0.5" value="${v}" aria-label="${m.name}">
-      <output>${Math.round(v)}°</output></div>`;
+      <div class="slider-row"><input type="range" min="${lo}" max="${hi}" step="${step}" value="${v}" aria-label="${m.name}">
+      <output></output></div>`;
     const input = wrap.querySelector("input"), out = wrap.querySelector("output");
+    m._input = input; m._out = out;
+    showMotionValue(m, v);
     input.addEventListener("input", () => {
       stopPlay();
+      showMotionValue(m, +input.value);
+      if (m.kind === "param") return previewParamMotion(m, +input.value);
       motionValues.set(m.name, +input.value);
-      out.textContent = `${Math.round(+input.value)}°`;
       updateTransforms();
     });
-    m._input = input; m._out = out;
     box.appendChild(wrap);
   }
 
@@ -222,7 +229,9 @@ function renderPanel() {
   // Parameters
   const form = $("params");
   form.innerHTML = "";
+  const driven = new Set(data.motions.filter((m) => m.param).map((m) => m.param));
   for (const [key, spec] of Object.entries(info.params)) {
+    if (driven.has(key)) continue; // shown as a Motion slider instead
     const label = document.createElement("label");
     label.innerHTML = `<span class="ptitle"><span>${spec.description || key}</span><span class="unit">${spec.unit}</span></span>`;
     const input = document.createElement("input");
@@ -242,7 +251,7 @@ function renderPanel() {
 
 // ---------- saved values and history ----------
 function formParams() {
-  const params = {};
+  const params = { ...current.params };
   for (const input of $("params").querySelectorAll("input")) params[input.name] = +input.value;
   return params;
 }
@@ -328,6 +337,62 @@ async function loadDesign(name, params = {}, { keepView = false } = {}) {
   }
 }
 
+// ---------- motions that rebuild the design (kind "param") ----------
+function motionValue(m) {
+  if (m.kind === "param") return current.params[m.param] ?? m.range[0];
+  return motionValues.get(m.name) ?? m.range[0];
+}
+
+function showMotionValue(m, v) {
+  m._input.value = v;
+  m._out.textContent = m.kind === "revolute" ? `${Math.round(v)}°` : `${Math.round(v)} ${m.unit || "mm"}`;
+}
+
+const frameCache = new Map(); // JSON(params) -> payload
+async function fetchFrame(params) {
+  const key = current.name + JSON.stringify(Object.entries(params).sort());
+  if (!frameCache.has(key)) {
+    if (frameCache.size > 400) frameCache.clear();
+    frameCache.set(key, await fetchJSON(`/api/designs/${encodeURIComponent(current.name)}${paramsQuery(params)}`));
+  }
+  return frameCache.get(key);
+}
+
+// Swap in new geometry without rebuilding the panel, so a slider keeps working while it rebuilds.
+function showFrame(data) {
+  const hidden = new Set([...partObjects].filter(([, o]) => !o.group.visible).map(([n]) => n));
+  clearScene();
+  current.data = { ...data, info: current.data.info, motions: current.data.motions }; // keep the slider wiring
+  current.params = data.params;
+  for (const p of data.parts) {
+    const group = makePart(p);
+    group.visible = !hidden.has(p.name);
+    root.add(group);
+    partObjects.set(p.name, { group, explode: new THREE.Vector3(...p.explode) });
+  }
+  updateTransforms();
+  $("notes").textContent = data.notes || "";
+}
+
+let pendingParamMotion = null, paramMotionBusy = false;
+async function previewParamMotion(m, value) {
+  pendingParamMotion = { ...current.params, [m.param]: value };
+  if (paramMotionBusy) return; // the newest value is picked up when the current build finishes
+  paramMotionBusy = true;
+  try {
+    while (pendingParamMotion) {
+      const params = pendingParamMotion;
+      pendingParamMotion = null;
+      showFrame(await fetchFrame(params));
+    }
+    markUnsaved();
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    paramMotionBusy = false;
+  }
+}
+
 // Explode slider
 $("explode").addEventListener("input", (ev) => {
   explode = +ev.target.value;
@@ -335,24 +400,63 @@ $("explode").addEventListener("input", (ev) => {
   updateTransforms();
 });
 
-// Play: swing every motion through its range and back.
+// Play: swing every motion through its range and back. Joint motions move
+// together; motions that rebuild the design play one after another from
+// frames fetched up front.
+const PLAY_PERIOD = 3200, FRAME_STEPS = 16;
+let playFrames = null; // [{ data, motion, value }] for param motions
+
 function stopPlay() { playing = false; $("play-all").textContent = "▶ Play"; }
-$("play-all").addEventListener("click", () => {
+$("play-all").addEventListener("click", async () => {
   if (playing) return stopPlay();
+  const paramMotions = current.data.motions.filter((m) => m.kind === "param");
+  playFrames = null;
+  if (paramMotions.length) {
+    const base = { ...current.params };
+    const plan = [];
+    for (const m of paramMotions) {
+      const [lo, hi] = m.range;
+      const up = Array.from({ length: FRAME_STEPS + 1 }, (_, i) => lo + ((hi - lo) * i) / FRAME_STEPS);
+      for (const v of [...up, ...up.slice(0, -1).reverse()]) plan.push({ motion: m, value: v, params: { ...base, [m.param]: v } });
+    }
+    const unique = [...new Set(plan.map((f) => JSON.stringify(f.params)))];
+    try {
+      for (let i = 0; i < unique.length; i++) {
+        setStatus(`Preparing animation… ${i + 1}/${unique.length}`);
+        await fetchFrame(JSON.parse(unique[i]));
+      }
+      for (const f of plan) f.data = await fetchFrame(f.params);
+    } catch (err) {
+      return setStatus(err.message, true);
+    }
+    setStatus("");
+    playFrames = plan;
+  }
   playing = true;
   playStart = performance.now();
   $("play-all").textContent = "❚❚ Pause";
 });
+
+let shownFrame = null;
 function stepPlay(now) {
   if (!playing || !current) return;
-  const period = 3200;
-  const t = ((now - playStart) % period) / period; // 0..1
+  const t = (Math.max(0, now - playStart) % PLAY_PERIOD) / PLAY_PERIOD; // 0..1
   const s = 0.5 - 0.5 * Math.cos(t * 2 * Math.PI); // ease in/out, 0→1→0
   for (const m of current.data.motions) {
+    if (m.kind === "param") continue;
     const [lo, hi] = m.range;
     const v = lo + (hi - lo) * s;
     motionValues.set(m.name, v);
-    if (m._input) { m._input.value = v; m._out.textContent = `${Math.round(v)}°`; }
+    if (m._input) showMotionValue(m, v);
+  }
+  if (playFrames) {
+    const fps = 12;
+    const frame = playFrames[Math.floor((Math.max(0, now - playStart) / 1000) * fps) % playFrames.length];
+    if (frame !== shownFrame) {
+      shownFrame = frame;
+      showFrame(frame.data);
+      for (const pm of current.data.motions) if (pm.kind === "param" && pm._input) showMotionValue(pm, current.params[pm.param]);
+    }
   }
   updateTransforms();
 }
@@ -416,5 +520,9 @@ async function init() {
   setInterval(pollCurrent, 1500);
 }
 
-window.aicad = { loadDesign, setExplode: (v) => { $("explode").value = v; $("explode").dispatchEvent(new Event("input")); } };
+window.aicad = {
+  loadDesign,
+  // For scripted screenshots: camera position and look-at point in mm.
+  setView: (position, target) => { camera.position.set(...position); controls.target.set(...target); controls.update(); },
+  setExplode: (v) => { $("explode").value = v; $("explode").dispatchEvent(new Event("input")); } };
 init();

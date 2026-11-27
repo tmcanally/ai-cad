@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from build123d import Axis, Edge, GeomType, RevoluteJoint, Shape
+from build123d import Axis, Edge, GeomType, LinearJoint, RevoluteJoint, Shape
 
 
 @dataclass
@@ -49,14 +49,26 @@ class Part:
 
 @dataclass
 class Motion:
-    """A degree of freedom the viewer can animate (currently revolute only)."""
+    """A degree of freedom the viewer can animate.
+
+    Three kinds:
+    - "revolute": `parts` turn about the axis through `origin` along `direction`;
+      `range` is in degrees. Read it from a build123d joint with `from_revolute_joint`.
+    - "linear": `parts` slide along `direction`; `range` is in mm. See `from_linear_joint`.
+    - "param": the design is rebuilt with parameter `param` swept across `range`.
+      Use it when a motion changes shape, not just position (fabric folding,
+      a spring compressing, several parts moving by different rules), so the
+      build() code decides where everything goes. See `from_param`.
+    """
 
     name: str
     parts: list[str]
-    origin: tuple[float, float, float]
-    direction: tuple[float, float, float]
-    range: tuple[float, float]
+    origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    direction: tuple[float, float, float] = (0.0, 0.0, 1.0)
+    range: tuple[float, float] = (0.0, 1.0)
     kind: str = "revolute"
+    param: str | None = None
+    unit: str = ""
 
     @classmethod
     def from_revolute_joint(
@@ -77,15 +89,38 @@ class Motion:
             range=tuple(joint.angular_range),
         )
 
+    @classmethod
+    def from_linear_joint(cls, name: str, joint: LinearJoint, parts: list[str]) -> "Motion":
+        """Read the world-space slide axis and travel limits (mm) from a build123d LinearJoint."""
+        axis: Axis = joint.relative_axis.located(joint.parent.location)
+        o, d = axis.position, axis.direction
+        return cls(
+            name=name,
+            parts=parts,
+            origin=(o.X, o.Y, o.Z),
+            direction=(d.X, d.Y, d.Z),
+            range=tuple(joint.linear_range),
+            kind="linear",
+        )
+
+    @classmethod
+    def from_param(cls, name: str, param: str, range: tuple[float, float], unit: str = "mm") -> "Motion":
+        """A motion played by rebuilding the design with `param` stepped across `range`."""
+        return cls(name=name, parts=[], range=tuple(range), kind="param", param=param, unit=unit)
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "name": self.name,
             "kind": self.kind,
             "parts": self.parts,
             "origin": list(self.origin),
             "direction": list(self.direction),
             "range": list(self.range),
+            "unit": self.unit or ("deg" if self.kind == "revolute" else "mm"),
         }
+        if self.param:
+            out["param"] = self.param
+        return out
 
 
 @dataclass
