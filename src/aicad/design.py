@@ -45,6 +45,14 @@ class Part:
     """Offset in mm applied when the viewer's explode slider is at 100%."""
     material: str = ""
     """Free text for now, e.g. "PLA" or "6 mm birch ply"."""
+    printable: bool | None = None
+    """Whether `aicad print` puts this part on the printer bed. None = guess from
+    `material` (anything starting with "Buy" or naming metal, wood or filament
+    pins is skipped; empty or a plastic like PLA/PETG is printed)."""
+    print_settings: dict[str, Any] = field(default_factory=dict)
+    """Per-part print defaults chosen by the design, e.g. {"orientation": "back",
+    "infill": 40, "supports": "off"}. See aicad.printing.PartSettings. A person's
+    overrides at print time win over these."""
 
 
 @dataclass

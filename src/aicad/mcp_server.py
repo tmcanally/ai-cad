@@ -14,7 +14,7 @@ from typing import Any
 
 from mcp.server import MCPServer
 
-from aicad import checks, export, history, registry, state
+from aicad import checks, export, history, printing, registry, state
 
 VIEWER_URL = os.environ.get("AICAD_VIEWER_URL", "http://127.0.0.1:8765")
 
@@ -74,7 +74,7 @@ mcp = MCPServer(
         "AI CAD: parametric CAD on build123d with a live 3D viewer at "
         f"{VIEWER_URL}. Use list_designs, read_design_source, write_design, "
         "set_params, build_design, undo_design, list_versions, restore_version "
-        "and export_stl.\n" + DESIGN_CONTRACT
+        "export_stl and prepare_print.\n" + DESIGN_CONTRACT
     ),
 )
 
@@ -205,3 +205,51 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+@mcp.tool()
+def prepare_print(
+    name: str,
+    params: dict[str, float] | None = None,
+    settings: dict[str, Any] | None = None,
+    part_settings: dict[str, dict[str, Any]] | None = None,
+    slice: bool = True,
+    out_dir: str | None = None,
+) -> dict[str, Any]:
+    """Make print-ready files for a 3D printer (default: AnkerMake M5, 235 x 235 x 250 mm).
+
+    Picks every printed part (parts whose material starts with "Buy", or names
+    metal, wood, fabric or filament pins, are left out), chooses the side each
+    one sits on (fewest overhangs, steady footprint; parts too long to lie
+    straight go across the diagonal), turns supports on only where overhangs
+    remain, adds a brim to tall or small-footprint parts, and packs everything
+    onto as few plates as it can (one filament per plate). Each plate becomes a
+    .3mf project (opens in AnkerMake Studio, PrusaSlicer or OrcaSlicer with parts
+    in place) and, when PrusaSlicer is installed, a sliced .gcode. Plates over
+    `max_plate_hours` are split. Also writes PRINT-LIST.md and plan.json.
+
+    `settings` (whole job, all optional): printer ("ankermake_m5"), filament
+    ("auto" from each part's material, or PLA, PLA+, PETG, ABS), layer_height
+    (0.2), spacing (6 mm), max_plate_hours (24), plus any per-part setting to
+    apply to every part.
+    `part_settings`: {part name: {...}} with orientation ("auto" or the side on
+    the bed: bottom, top, front, back, left, right), supports (auto/on/off),
+    infill (percent, 20), walls (3), brim (mm or "auto"), copies (1).
+    A design can set per-part defaults with Part(print_settings={...}).
+
+    Returns plates (parts, files, print time, grams), each piece's chosen
+    orientation and settings with the reason, parts not printed, and parts too
+    big for the bed. Tell the person the plates, time and filament, and any
+    choices worth a second look.
+    """
+    try:
+        design, resolved = registry.build(name, params)
+        plan = printing.plan_print(design, settings, part_settings)
+        printer = plan.job.printer
+        target = Path(out_dir) if out_dir else registry.project_root() / "exports" / name / printer
+        summary = printing.write_print_job(plan, design, target, slice=slice)
+    except Exception as exc:
+        return {"error": str(exc), "traceback": traceback.format_exc(limit=8)}
+    summary["params"] = resolved
+    summary["viewer"] = f"{VIEWER_URL}/?design={name}"
+    return summary

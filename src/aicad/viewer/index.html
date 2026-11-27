@@ -56,6 +56,28 @@
         <a id="download-all" class="button" href="#">Download all STLs (.zip)</a>
       </section>
 
+      <section id="print-section">
+        <div class="section-title row">
+          <span>Print</span>
+          <span id="print-printer" class="muted small-text"></span>
+        </div>
+        <div class="print-grid">
+          <label>Filament
+            <select id="print-filament"></select>
+          </label>
+          <label>Infill %
+            <input type="number" id="print-infill" min="0" max="100" step="5" value="20">
+          </label>
+          <label>Layer mm
+            <input type="number" id="print-layer" min="0.08" max="0.32" step="0.04" value="0.2">
+          </label>
+        </div>
+        <label class="check"><input type="checkbox" id="print-slice" checked> Slice to G-code</label>
+        <button id="print-go" type="button" class="wide">Prepare print files</button>
+        <p id="print-slicer-note" class="muted" hidden></p>
+        <div id="print-result"></div>
+      </section>
+
       <section id="params-section">
         <div class="section-title row">
           <span>Parameters</span>

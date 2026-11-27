@@ -87,6 +87,34 @@ button:disabled { opacity: 0.45; cursor: default; }
 #params .ptitle { display: flex; justify-content: space-between; }
 #params .unit { color: var(--muted); }
 
+/* print */
+.small-text { font-size: 12px; margin: 0; font-weight: 400; }
+.print-grid { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 6px; }
+.print-grid label { font-size: 12px; color: var(--muted); }
+.print-grid select, .print-grid input { margin-top: 2px; padding: 5px 6px; }
+.check { display: flex; align-items: center; gap: 6px; font-size: 13px; margin: 8px 0; }
+button.wide, .button.wide { width: 100%; text-align: center; }
+.plate { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.plate-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
+.plate-head .stats { color: var(--muted); font-size: 12px; }
+.plate svg { width: 100%; height: auto; display: block; margin: 6px 0; }
+.plate svg .bed { fill: var(--bg); stroke: var(--border); }
+.plate svg .piece { fill: var(--accent); fill-opacity: 0.35; stroke: var(--accent); stroke-width: 1; }
+.plate svg .piece.supports { fill: #d98b2b; stroke: #d98b2b; }
+.plate svg .piece.sel { fill-opacity: 0.8; }
+.plate svg text { font-size: 9px; fill: var(--text); pointer-events: none; }
+.plate .links { display: flex; gap: 10px; font-size: 12px; }
+.plate .links a, .print-notes a { color: var(--accent); }
+#print-result .button { margin-top: 8px; }
+.plate .error { color: #c0392b; font-size: 12px; }
+.pieces { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.pieces td { padding: 2px 2px; vertical-align: middle; }
+.pieces td:first-child { word-break: break-all; }
+.pieces select { padding: 2px 3px; font-size: 12px; width: auto; }
+.pieces tr.changed td:first-child { color: var(--accent); font-weight: 600; }
+.print-total { font-size: 13px; margin: 10px 0 0; }
+.print-notes { font-size: 12px; color: var(--muted); margin: 8px 0 0; padding-left: 16px; }
+
 @media (max-width: 760px) {
   #app { flex-direction: column; height: auto; }
   #viewport { height: 60vh; flex: none; }
