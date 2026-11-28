@@ -134,9 +134,11 @@ def restore(name: str, version: int) -> dict[str, Any]:
         have = [v["version"] for v in list_versions(name)]
         raise KeyError(f"{name} has no version {version}. Versions: {have}")
     source = (vdir / "design.py").read_text()
-    path, _ = registry.get_path(name)
-    if path.read_text() != source:
-        registry.save_design(name, source)  # built-ins get a user copy in designs/
+    path, builtin = registry.get_path(name)
+    # A built-in model's code is updated with AI CAD itself, so restoring one brings back its
+    # saved values only. Writing the old code to designs/ would hide every later update.
+    if not builtin and path.read_text() != source:
+        registry.save_design(name, source)
     _write_saved_params(name, json.loads((vdir / "params.json").read_text()))
     note = _read_meta(vdir).get("note", "")
     return snapshot(name, f"Restored version {version}" + (f" ({note})" if note else ""), restored_from=int(version))

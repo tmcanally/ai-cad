@@ -97,6 +97,19 @@ def test_saved_values_for_builtin_designs():
     assert registry.build("hinged_box")[1]["width"] == 80
 
 
+def test_restoring_a_builtin_after_its_code_changed_keeps_the_new_code():
+    # A version saved under older built-in code must not bring that code back as a
+    # designs/ copy, or every later update to the built-in would be hidden behind it.
+    mcp_server.set_params("hinged_box", {"width": 120})
+    mcp_server.set_params("hinged_box", {"width": 100})
+    first = history.list_versions("hinged_box")[0]["version"]
+    old = history.history_dir("hinged_box") / str(first) / "design.py"
+    old.write_text(old.read_text() + "\n# older code\n")
+    history.restore("hinged_box", first)
+    assert not (registry.designs_dir() / "hinged_box.py").exists()
+    assert registry.get_path("hinged_box")[1]  # still the built-in
+
+
 def test_parameter_check():
     clean = mcp_server.write_design("plate", V1)
     assert clean["warnings"] == []
