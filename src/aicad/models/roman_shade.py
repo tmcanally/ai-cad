@@ -92,7 +92,8 @@ PARAMS = {
     "rail_height": Param(30, 15, 60, description="Middle and bottom rail height"),
     "rail_depth": Param(22, 12, 50, description="Middle and bottom rail depth"),
     "handle_length": Param(80, 0, 200, description="Pull handle length on each rail (0 = none)"),
-    "fold_spacing": Param(180, 80, 400, description="Fabric length between battens"),
+    "fold_spacing": Param(180, 80, 400, description="Fabric length between battens (used when batten_count is 0)"),
+    "batten_count": Param(0, 0, 20, unit="", description="Number of battens (0 = work it out from fold_spacing)"),
     "batten_size": Param(8, 4, 15, description="Batten thickness"),
     "fabric_thickness": Param(1.5, 0.5, 5, description="Fabric thickness"),
     "spring_diameter": Param(28, 12, 40, description="Constant-force spring coil diameter"),
@@ -134,6 +135,7 @@ def build(
     rail_depth=22,
     handle_length=80,
     fold_spacing=180,
+    batten_count=0,
     batten_size=8,
     fabric_thickness=1.5,
     spring_diameter=28,
@@ -169,7 +171,7 @@ def build(
 
     # ---------------- fabric layout and the two positions ----------------
     fabric_len = top - 2 * rh  # fabric between the rails when the shade is fully closed
-    n_folds = max(1, round(fabric_len / fold_spacing))
+    n_folds = int(batten_count) + 1 if batten_count >= 1 else max(1, round(fabric_len / fold_spacing))
     pitch = fabric_len / n_folds
     n_battens = n_folds - 1
     stack = n_battens * bt + 2 * ft * n_folds  # height of everything stacked on the bottom rail

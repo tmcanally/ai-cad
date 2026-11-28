@@ -301,3 +301,11 @@ def test_every_version_has_printable_mounts_that_clear_everything(variant, expec
         for o in others + [x for x in mounts if x is not m]:
             for s in o.shape.solids():
                 assert not _overlap(m.shape, s), (m.name, o.name)
+
+
+@pytest.mark.parametrize("count", [2, 8])
+def test_batten_count_can_be_picked(count):
+    design, _ = registry.build("roman_shade", {"batten_count": count, "bottom_raise": 300})
+    assert len(design.part("battens").shape.solids()) == count
+    for part in design.parts:
+        assert part.shape.is_valid, part.name
