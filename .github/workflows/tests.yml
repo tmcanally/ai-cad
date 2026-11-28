@@ -15,4 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+      - name: PrusaSlicer (for the slicing test)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q prusa-slicer
       - run: ./setup.sh --no-serve

@@ -7,11 +7,11 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from aicad import export, registry, state
+from aicad import export, history, printing, registry, state
 
 VIEWER_DIR = Path(__file__).resolve().parent / "viewer"
 
@@ -33,7 +33,7 @@ def _params_from_query(request: Request) -> dict[str, Any]:
 
 def _build(name: str, params: dict[str, Any]):
     try:
-        return registry.build(name, params)
+        return registry.build(name, params, strict=False)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -52,13 +52,74 @@ def api_current() -> JSONResponse:
     return JSONResponse(state.get_current() or {})
 
 
+_mesh_cache: dict[int, tuple[Any, dict[str, Any]]] = {}
+
+
 @app.get("/api/designs/{name}")
 def api_design(name: str, request: Request) -> JSONResponse:
     design, resolved = _build(name, _params_from_query(request))
-    payload = design.to_viewer_json()
+    # Tessellating is the slow part, so keep meshes for recently built designs
+    # (animated motions fetch the same frames again on every Play).
+    key = id(design)
+    if key not in _mesh_cache or _mesh_cache[key][0] is not design:
+        if len(_mesh_cache) > 256:
+            _mesh_cache.clear()
+        _mesh_cache[key] = (design, design.to_viewer_json())
+    payload = dict(_mesh_cache[key][1])
     payload["params"] = resolved
-    payload["info"] = registry.get_info(name).to_dict()
+    info = registry.get_info(name)
+    payload["info"] = info.to_dict()
+    payload["saved_params"] = registry.resolve_params(info, registry.saved_params(info))
     return JSONResponse(payload)
+
+
+# ---------- history and saved values (the same operations Claude has over MCP) ----------
+
+
+def _changed(name: str, meta: dict[str, Any]) -> dict[str, Any]:
+    """Tell the viewer (and any other open viewer) what is current now."""
+    _, resolved = _build(name, {})
+    st = state.set_current(name, resolved)
+    return {"version": meta["version"], "note": meta.get("note", ""), "params": resolved, "state_version": st["version"]}
+
+
+def _history_call(fn, *args):
+    try:
+        return fn(*args)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc).strip("'\"")) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/designs/{name}/versions")
+def api_versions(name: str) -> list[dict[str, Any]]:
+    _history_call(registry.get_path, name)
+    return list(reversed(history.list_versions(name)))
+
+
+@app.post("/api/designs/{name}/params")
+def api_save_params(name: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    params = body.get("params")
+    if not isinstance(params, dict):
+        raise HTTPException(400, "Body must be {\"params\": {...}}")
+    meta = _history_call(history.save_params, name, params, body.get("note", ""))
+    return _changed(name, meta)
+
+
+@app.delete("/api/designs/{name}/params")
+def api_clear_params(name: str) -> dict[str, Any]:
+    return _changed(name, _history_call(history.clear_params, name))
+
+
+@app.post("/api/designs/{name}/restore/{version}")
+def api_restore(name: str, version: int) -> dict[str, Any]:
+    return _changed(name, _history_call(history.restore, name, version))
+
+
+@app.post("/api/designs/{name}/undo")
+def api_undo(name: str) -> dict[str, Any]:
+    return _changed(name, _history_call(history.undo, name))
 
 
 @app.get("/api/designs/{name}/stl")
@@ -74,6 +135,64 @@ def api_stl(name: str, request: Request, part: str | None = Query(None)) -> Resp
         data = export.stl_zip_bytes(design)
         filename, media = f"{design.name}-stl.zip", "application/zip"
     return Response(data, media_type=media, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ---------- print files (orient, arrange and slice for a 3D printer) ----------
+
+
+def _print_dir(name: str, printer: str) -> Path:
+    if printer not in printing.PRINTERS:
+        raise HTTPException(400, f"Unknown printer {printer!r}. Known: {sorted(printing.PRINTERS)}")
+    return registry.project_root() / "exports" / name / printer
+
+
+@app.get("/api/printers")
+def api_printers() -> dict[str, Any]:
+    return {
+        "printers": [{"id": p.id, "name": p.name, "bed": list(p.bed), "height": p.height} for p in printing.PRINTERS.values()],
+        "filaments": ["auto", *printing.FILAMENTS],
+        "orientations": ["auto", *printing.ORIENTATIONS],
+        "slicer": printing.find_slicer(),
+    }
+
+
+@app.post("/api/designs/{name}/print")
+def api_print(name: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    """Body: {"params": {...}, "settings": {...}, "part_settings": {part: {...}}, "slice": true}."""
+    design, resolved = _build(name, body.get("params") or {})
+    settings = body.get("settings") or {}
+    try:
+        plan = printing.plan_print(design, settings, body.get("part_settings") or {})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    out = _print_dir(name, plan.job.printer)
+    summary = printing.write_print_job(plan, design, out, slice=bool(body.get("slice", True)))
+    base = f"/api/designs/{name}/print/{plan.job.printer}"
+    for plate in summary["plates"]:
+        plate["files"] = {k: f"{base}/files/{Path(plate[k]).name}" for k in ("project_3mf", "gcode") if plate.get(k)}
+    summary["zip"] = f"{base}/zip"
+    summary["params"] = resolved
+    summary["bed"] = list(plan.printer.bed)
+    return summary
+
+
+@app.get("/api/designs/{name}/print/{printer}/files/{filename}")
+def api_print_file(name: str, printer: str, filename: str) -> FileResponse:
+    folder = _print_dir(name, printer)
+    path = (folder / filename).resolve()
+    if path.parent != folder.resolve() or not path.is_file():
+        raise HTTPException(404, f"No file {filename!r}; prepare the print first")
+    return FileResponse(path, filename=filename)
+
+
+@app.get("/api/designs/{name}/print/{printer}/zip")
+def api_print_zip(name: str, printer: str) -> Response:
+    folder = _print_dir(name, printer)
+    if not folder.is_dir():
+        raise HTTPException(404, "Prepare the print first")
+    filename = f"{name}-{printer}.zip"
+    return Response(printing.job_zip_bytes(folder), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/")

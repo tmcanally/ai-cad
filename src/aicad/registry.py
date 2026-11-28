@@ -113,11 +113,17 @@ def get_info(name: str) -> DesignInfo:
     )
 
 
-def resolve_params(info: DesignInfo, params: dict[str, Any] | None) -> dict[str, float]:
-    """Fill defaults, coerce to numbers and clamp to each Param's limits."""
+def resolve_params(info: DesignInfo, params: dict[str, Any] | None, strict: bool = True) -> dict[str, float]:
+    """Fill defaults, coerce to numbers and clamp to each Param's limits.
+
+    Unknown names are an error when `strict` (catches typos from Claude); otherwise they
+    are dropped, so a viewer holding values from an older version of a design still works.
+    """
     params = dict(params or {})
     unknown = set(params) - set(info.params)
-    if unknown and info.params:
+    if unknown and info.params and not strict:
+        params = {k: v for k, v in params.items() if k in info.params}
+    elif unknown and info.params:
         raise ValueError(f"Unknown parameters {sorted(unknown)} for {info.name}. Known: {sorted(info.params)}")
     resolved: dict[str, float] = {}
     for key, spec in info.params.items():
@@ -135,18 +141,29 @@ def resolve_params(info: DesignInfo, params: dict[str, Any] | None) -> dict[str,
 _cache: dict[tuple, Design] = {}
 
 
-def build(name: str, params: dict[str, Any] | None = None) -> tuple[Design, dict[str, float]]:
-    """Build a design, caching by (name, params, file modification time)."""
+def saved_params(info: DesignInfo) -> dict[str, float]:
+    """Values saved for this design (see aicad.history), limited to parameters it still has."""
+    from aicad.history import load_saved_params
+
+    saved = load_saved_params(info.name)
+    return {k: v for k, v in saved.items() if k in info.params}
+
+
+def build(name: str, params: dict[str, Any] | None = None, strict: bool = True) -> tuple[Design, dict[str, float]]:
+    """Build a design, caching by (name, params, file modification time).
+
+    Parameters not given fall back to the saved values, then to the design's defaults.
+    """
     path, _ = get_path(name)
     info = get_info(name)
-    resolved = resolve_params(info, params)
+    resolved = resolve_params(info, {**saved_params(info), **(params or {})}, strict=strict)
     key = (name, path.stat().st_mtime_ns, tuple(sorted(resolved.items())))
     if key not in _cache:
         module = _load_module(name, path)
         design = module.build(**resolved)
         if not isinstance(design, Design):
             raise TypeError(f"{name}.build() returned {type(design).__name__}, expected aicad.design.Design")
-        if len(_cache) > 32:
+        if len(_cache) > 256:  # room for every frame of an animated motion
             _cache.clear()
         _cache[key] = design
     return _cache[key], resolved

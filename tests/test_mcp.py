@@ -45,3 +45,12 @@ def test_write_design_reports_errors():
 def test_call_tool_over_protocol_layer():
     result = call("list_designs", {})
     assert result is not None
+
+
+def test_prepare_print_tool(tmp_path):
+    out = mcp_server.prepare_print("hinged_box", settings={"infill": 30}, slice=False, out_dir=str(tmp_path))
+    assert "error" not in out, out
+    assert {p["part"] for p in out["pieces"]} == {"base", "lid"}
+    assert out["not_printed"][0]["part"] == "pin"
+    assert all(p["infill_pct"] == 30 for p in out["pieces"])
+    assert (tmp_path / "hinged_box-plate_1.3mf").exists()

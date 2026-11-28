@@ -42,3 +42,19 @@ def test_errors():
     assert client.get("/api/designs/nope").status_code == 404
     assert client.get("/api/designs/hinged_box", params={"params": "{bad"}).status_code == 400
     assert client.get("/api/designs/hinged_box/stl", params={"part": "nope"}).status_code == 404
+
+
+def test_print_endpoint_and_downloads():
+    info = client.get("/api/printers").json()
+    assert info["printers"][0]["id"] == "ankermake_m5"
+    r = client.post("/api/designs/hinged_box/print", json={"slice": False, "part_settings": {"lid": {"supports": "on"}}})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    lid = next(p for p in data["pieces"] if p["part"] == "lid")
+    assert lid["supports"] is True
+    f = client.get(data["plates"][0]["files"]["project_3mf"])
+    assert f.status_code == 200 and f.content[:2] == b"PK"
+    z = zipfile.ZipFile(io.BytesIO(client.get(data["zip"]).content))
+    assert "PRINT-LIST.md" in z.namelist()
+    assert client.post("/api/designs/hinged_box/print", json={"settings": {"filament": "wood"}}).status_code == 400
+    assert client.get("/api/designs/hinged_box/print/ankermake_m5/files/..%2Fsecret").status_code == 404

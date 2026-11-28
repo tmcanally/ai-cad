@@ -68,6 +68,20 @@ async function fetchJSON(url) {
   return res.json();
 }
 
+async function sendJSON(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).detail || msg; } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
 function paramsQuery(params) {
   return params && Object.keys(params).length ? `?params=${encodeURIComponent(JSON.stringify(params))}` : "";
 }
@@ -128,14 +142,18 @@ function updateTransforms() {
   for (const [name, obj] of partObjects) {
     const m = new THREE.Matrix4();
     for (const motion of current.data.motions) {
-      if (!motion.parts.includes(name) || motion.kind !== "revolute") continue;
-      const deg = motionValues.get(motion.name) ?? motion.range[0];
-      const o = new THREE.Vector3(...motion.origin);
+      if (!motion.parts.includes(name)) continue;
+      const value = motionValues.get(motion.name) ?? motion.range[0];
       const axis = new THREE.Vector3(...motion.direction).normalize();
-      const r = new THREE.Matrix4().makeTranslation(o.x, o.y, o.z)
-        .multiply(new THREE.Matrix4().makeRotationAxis(axis, THREE.MathUtils.degToRad(deg)))
-        .multiply(new THREE.Matrix4().makeTranslation(-o.x, -o.y, -o.z));
-      m.premultiply(r);
+      if (motion.kind === "revolute") {
+        const o = new THREE.Vector3(...motion.origin);
+        m.premultiply(new THREE.Matrix4().makeTranslation(o.x, o.y, o.z)
+          .multiply(new THREE.Matrix4().makeRotationAxis(axis, THREE.MathUtils.degToRad(value)))
+          .multiply(new THREE.Matrix4().makeTranslation(-o.x, -o.y, -o.z)));
+      } else if (motion.kind === "linear") {
+        const t = axis.multiplyScalar(value);
+        m.premultiply(new THREE.Matrix4().makeTranslation(t.x, t.y, t.z));
+      }
     }
     const e = obj.explode.clone().multiplyScalar(explode);
     m.premultiply(new THREE.Matrix4().makeTranslation(e.x, e.y, e.z));
@@ -172,18 +190,21 @@ function renderPanel() {
     const wrap = document.createElement("div");
     wrap.className = "motion";
     const [lo, hi] = m.range;
-    const v = motionValues.get(m.name) ?? lo;
+    const v = motionValue(m);
+    const step = m.kind === "revolute" ? 0.5 : Math.max((hi - lo) / 400, 0.1);
     wrap.innerHTML = `<div class="motion-name">${m.name.replace(/_/g, " ")}</div>
-      <div class="slider-row"><input type="range" min="${lo}" max="${hi}" step="0.5" value="${v}" aria-label="${m.name}">
-      <output>${Math.round(v)}°</output></div>`;
+      <div class="slider-row"><input type="range" min="${lo}" max="${hi}" step="${step}" value="${v}" aria-label="${m.name}">
+      <output></output></div>`;
     const input = wrap.querySelector("input"), out = wrap.querySelector("output");
+    m._input = input; m._out = out;
+    showMotionValue(m, v);
     input.addEventListener("input", () => {
       stopPlay();
+      showMotionValue(m, +input.value);
+      if (m.kind === "param") return previewParamMotion(m, +input.value);
       motionValues.set(m.name, +input.value);
-      out.textContent = `${Math.round(+input.value)}°`;
       updateTransforms();
     });
-    m._input = input; m._out = out;
     box.appendChild(wrap);
   }
 
@@ -208,7 +229,16 @@ function renderPanel() {
   // Parameters
   const form = $("params");
   form.innerHTML = "";
+  const driven = new Set(data.motions.filter((m) => m.param).map((m) => m.param));
+  // Advanced parameters go in a collapsed section; it stays open across rebuilds once opened.
+  const advanced = document.createElement("details");
+  advanced.className = "advanced";
+  advanced.open = advancedOpen;
+  advanced.addEventListener("toggle", () => { advancedOpen = advanced.open; });
+  const advCount = Object.entries(info.params).filter(([k, s]) => s.advanced && !driven.has(k)).length;
+  advanced.innerHTML = `<summary>Advanced <span class="unit">(${advCount})</span></summary>`;
   for (const [key, spec] of Object.entries(info.params)) {
+    if (driven.has(key)) continue; // shown as a Motion slider instead
     const label = document.createElement("label");
     label.innerHTML = `<span class="ptitle"><span>${spec.description || key}</span><span class="unit">${spec.unit}</span></span>`;
     const input = document.createElement("input");
@@ -219,9 +249,77 @@ function renderPanel() {
     if (spec.max != null) input.max = spec.max;
     input.value = params[key] ?? spec.default;
     label.appendChild(input);
-    form.appendChild(label);
+    (spec.advanced ? advanced : form).appendChild(label);
   }
-  $("rebuild").style.display = Object.keys(info.params).length ? "" : "none";
+  if (advCount) form.appendChild(advanced);
+  $("params-section").style.display = Object.keys(info.params).length ? "" : "none";
+  markUnsaved();
+  renderHistory();
+  resetPrint();
+}
+
+// ---------- saved values and history ----------
+function formParams() {
+  const params = { ...current.params };
+  for (const input of $("params").querySelectorAll("input")) params[input.name] = +input.value;
+  return params;
+}
+
+function markUnsaved() {
+  if (!current) return;
+  const saved = current.data.saved_params || {};
+  let dirty = false;
+  for (const input of $("params").querySelectorAll("input")) {
+    const changed = saved[input.name] !== undefined && +input.value !== saved[input.name];
+    input.classList.toggle("changed", changed);
+    dirty ||= changed;
+  }
+  $("unsaved").hidden = !dirty;
+  $("save-params").disabled = !dirty;
+  $("revert-params").disabled = !dirty;
+}
+
+let showAllVersions = false;
+let advancedOpen = false;
+async function renderHistory() {
+  if (!current) return;
+  const name = current.name;
+  let versions = [];
+  try { versions = await fetchJSON(`/api/designs/${encodeURIComponent(name)}/versions`); } catch {}
+  if (!current || current.name !== name) return;
+  const ol = $("versions");
+  ol.innerHTML = "";
+  const shown = showAllVersions ? versions : versions.slice(0, 6);
+  shown.forEach((v, i) => {
+    const li = document.createElement("li");
+    const when = new Date(v.time.replace(/([+-]\d\d)(\d\d)$/, "$1:$2"));
+    const time = isNaN(when) ? v.time : when.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    li.innerHTML = `<span class="vnum">v${v.version}</span>
+      <span class="vnote"></span>
+      ${i === 0 ? '<span class="current">current</span>' : '<button class="ghost">Restore</button>'}`;
+    const note = li.querySelector(".vnote");
+    note.textContent = v.note || "(no note)";
+    const t = document.createElement("span");
+    t.className = "vtime";
+    t.textContent = time;
+    note.appendChild(t);
+    li.querySelector("button")?.addEventListener("click", () => historyAction("POST", `restore/${v.version}`, `Restoring v${v.version}…`));
+    ol.appendChild(li);
+  });
+  $("more-versions").hidden = showAllVersions || versions.length <= 6;
+  $("undo").disabled = versions.length < 2 || (versions[0].restored_from ?? versions[0].version) <= 1;
+}
+
+async function historyAction(method, path, message, body) {
+  if (!current) return;
+  setStatus(message);
+  try {
+    const res = await sendJSON(method, `/api/designs/${encodeURIComponent(current.name)}/${path}`, body);
+    lastStateVersion = res.state_version; // our own change; don't reload twice via Follow
+    await loadDesign(current.name, {}, { keepView: true });
+  } catch (err) {
+    setStatus(err.message, true);
+  }
 }
 
 async function loadDesign(name, params = {}, { keepView = false } = {}) {
@@ -245,7 +343,63 @@ async function loadDesign(name, params = {}, { keepView = false } = {}) {
     history.replaceState(null, "", url);
     setStatus("");
   } catch (err) {
-    setStatus(`Could not build ${name}:\n${err.message}`, true);
+    setStatus(`Could not build ${name}:\n${err.message}\n\nIf saved or edited values caused this, press "Reset to defaults" under Parameters.`, true);
+  }
+}
+
+// ---------- motions that rebuild the design (kind "param") ----------
+function motionValue(m) {
+  if (m.kind === "param") return current.params[m.param] ?? m.range[0];
+  return motionValues.get(m.name) ?? m.range[0];
+}
+
+function showMotionValue(m, v) {
+  m._input.value = v;
+  m._out.textContent = m.kind === "revolute" ? `${Math.round(v)}°` : `${Math.round(v)} ${m.unit || "mm"}`;
+}
+
+const frameCache = new Map(); // JSON(params) -> payload
+async function fetchFrame(params) {
+  const key = current.name + JSON.stringify(Object.entries(params).sort());
+  if (!frameCache.has(key)) {
+    if (frameCache.size > 400) frameCache.clear();
+    frameCache.set(key, await fetchJSON(`/api/designs/${encodeURIComponent(current.name)}${paramsQuery(params)}`));
+  }
+  return frameCache.get(key);
+}
+
+// Swap in new geometry without rebuilding the panel, so a slider keeps working while it rebuilds.
+function showFrame(data) {
+  const hidden = new Set([...partObjects].filter(([, o]) => !o.group.visible).map(([n]) => n));
+  clearScene();
+  current.data = { ...data, info: current.data.info, motions: current.data.motions }; // keep the slider wiring
+  current.params = data.params;
+  for (const p of data.parts) {
+    const group = makePart(p);
+    group.visible = !hidden.has(p.name);
+    root.add(group);
+    partObjects.set(p.name, { group, explode: new THREE.Vector3(...p.explode) });
+  }
+  updateTransforms();
+  $("notes").textContent = data.notes || "";
+}
+
+let pendingParamMotion = null, paramMotionBusy = false;
+async function previewParamMotion(m, value) {
+  pendingParamMotion = { ...current.params, [m.param]: value };
+  if (paramMotionBusy) return; // the newest value is picked up when the current build finishes
+  paramMotionBusy = true;
+  try {
+    while (pendingParamMotion) {
+      const params = pendingParamMotion;
+      pendingParamMotion = null;
+      showFrame(await fetchFrame(params));
+    }
+    markUnsaved();
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    paramMotionBusy = false;
   }
 }
 
@@ -256,36 +410,99 @@ $("explode").addEventListener("input", (ev) => {
   updateTransforms();
 });
 
-// Play: swing every motion through its range and back.
+// Play: swing every motion through its range and back. Joint motions move
+// together; motions that rebuild the design play one after another from
+// frames fetched up front.
+const PLAY_PERIOD = 3200, FRAME_STEPS = 16;
+let playFrames = null; // [{ data, motion, value }] for param motions
+
 function stopPlay() { playing = false; $("play-all").textContent = "▶ Play"; }
-$("play-all").addEventListener("click", () => {
+$("play-all").addEventListener("click", async () => {
   if (playing) return stopPlay();
+  const paramMotions = current.data.motions.filter((m) => m.kind === "param");
+  playFrames = null;
+  if (paramMotions.length) {
+    const base = { ...current.params };
+    const plan = [];
+    for (const m of paramMotions) {
+      const [lo, hi] = m.range;
+      const up = Array.from({ length: FRAME_STEPS + 1 }, (_, i) => lo + ((hi - lo) * i) / FRAME_STEPS);
+      for (const v of [...up, ...up.slice(0, -1).reverse()]) plan.push({ motion: m, value: v, params: { ...base, [m.param]: v } });
+    }
+    const unique = [...new Set(plan.map((f) => JSON.stringify(f.params)))];
+    try {
+      for (let i = 0; i < unique.length; i++) {
+        setStatus(`Preparing animation… ${i + 1}/${unique.length}`);
+        await fetchFrame(JSON.parse(unique[i]));
+      }
+      for (const f of plan) f.data = await fetchFrame(f.params);
+    } catch (err) {
+      return setStatus(err.message, true);
+    }
+    setStatus("");
+    playFrames = plan;
+  }
   playing = true;
   playStart = performance.now();
   $("play-all").textContent = "❚❚ Pause";
 });
+
+let shownFrame = null;
 function stepPlay(now) {
   if (!playing || !current) return;
-  const period = 3200;
-  const t = ((now - playStart) % period) / period; // 0..1
+  const t = (Math.max(0, now - playStart) % PLAY_PERIOD) / PLAY_PERIOD; // 0..1
   const s = 0.5 - 0.5 * Math.cos(t * 2 * Math.PI); // ease in/out, 0→1→0
   for (const m of current.data.motions) {
+    if (m.kind === "param") continue;
     const [lo, hi] = m.range;
     const v = lo + (hi - lo) * s;
     motionValues.set(m.name, v);
-    if (m._input) { m._input.value = v; m._out.textContent = `${Math.round(v)}°`; }
+    if (m._input) showMotionValue(m, v);
+  }
+  if (playFrames) {
+    const fps = 12;
+    const frame = playFrames[Math.floor((Math.max(0, now - playStart) / 1000) * fps) % playFrames.length];
+    if (frame !== shownFrame) {
+      shownFrame = frame;
+      showFrame(frame.data);
+      for (const pm of current.data.motions) if (pm.kind === "param" && pm._input) showMotionValue(pm, current.params[pm.param]);
+    }
   }
   updateTransforms();
 }
 
 $("design-select").addEventListener("change", (ev) => loadDesign(ev.target.value));
+// Editing a value previews it straight away; "Save values" keeps it.
 $("params").addEventListener("submit", (ev) => {
   ev.preventDefault();
-  const params = {};
-  for (const input of ev.target.querySelectorAll("input")) params[input.name] = +input.value;
-  loadDesign(current.name, params, { keepView: true });
+  loadDesign(current.name, formParams(), { keepView: true });
 });
-$("reset-params").addEventListener("click", () => current && loadDesign(current.name, {}, { keepView: true }));
+$("params").addEventListener("input", markUnsaved);
+$("params").addEventListener("change", () => loadDesign(current.name, formParams(), { keepView: true }));
+$("save-params").addEventListener("click", () => {
+  const saved = current.data.saved_params || {};
+  const changed = Object.fromEntries(Object.entries(formParams()).filter(([k, v]) => v !== saved[k]));
+  historyAction("POST", "params", "Saving…", { params: changed });
+});
+$("revert-params").addEventListener("click", () => current && loadDesign(current.name, {}, { keepView: true }));
+// Reset: forget saved values (kept in history, so Undo brings them back) and rebuild from the
+// design's defaults. Works even when the last build failed.
+$("reset-params").addEventListener("click", async () => {
+  const name = current?.name || $("design-select").value;
+  if (!name) return;
+  setStatus("Resetting to defaults…");
+  try {
+    const res = await sendJSON("DELETE", `/api/designs/${encodeURIComponent(name)}/params`);
+    lastStateVersion = res.state_version;
+    motionValues = new Map();
+    frameCache.clear();
+    await loadDesign(name, {}, { keepView: true });
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+});
+$("undo").addEventListener("click", () => historyAction("POST", "undo", "Undoing…"));
+$("more-versions").addEventListener("click", () => { showAllVersions = true; renderHistory(); });
 
 // Follow Claude: reload when the MCP server builds something.
 async function pollCurrent() {
@@ -329,5 +546,171 @@ async function init() {
   setInterval(pollCurrent, 1500);
 }
 
-window.aicad = { loadDesign, setExplode: (v) => { $("explode").value = v; $("explode").dispatchEvent(new Event("input")); } };
+// ---------- print files ----------
+let printInfo = null;
+let printOverrides = {}; // part -> { orientation, supports }
+let lastPrint = null;
+let selectedPiece = null;
+
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+async function initPrint() {
+  try {
+    printInfo = await fetchJSON("/api/printers");
+  } catch { $("print-section").hidden = true; return; }
+  const p = printInfo.printers[0];
+  $("print-printer").textContent = `${p.name} · ${p.bed[0]}×${p.bed[1]}×${p.height} mm`;
+  $("print-filament").innerHTML = printInfo.filaments
+    .map((f) => `<option value="${f}">${f === "auto" ? "From parts" : f}</option>`).join("");
+  if (!printInfo.slicer) {
+    $("print-slicer-note").hidden = false;
+    $("print-slicer-note").textContent =
+      "PrusaSlicer isn't installed, so this makes .3mf plates to open in AnkerMake Studio. Install PrusaSlicer for ready-to-print G-code.";
+    $("print-slice").checked = false;
+    $("print-slice").disabled = true;
+  }
+}
+
+function resetPrint() {
+  printOverrides = {};
+  lastPrint = null;
+  selectedPiece = null;
+  $("print-result").innerHTML = "";
+}
+
+async function preparePrint() {
+  if (!current) return;
+  const btn = $("print-go");
+  const slice = $("print-slice").checked;
+  btn.disabled = true;
+  btn.textContent = slice ? "Slicing… (about a minute per plate)" : "Arranging…";
+  const settings = { infill: +$("print-infill").value, layer_height: +$("print-layer").value };
+  const fil = $("print-filament").value;
+  if (fil !== "auto") settings.filament = fil;
+  try {
+    lastPrint = await sendJSON("POST", `/api/designs/${current.name}/print`, {
+      params: current.params, settings, part_settings: printOverrides, slice,
+    });
+    renderPrint();
+  } catch (err) {
+    $("print-result").innerHTML = `<p class="plate error">${esc(err.message)}</p>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Prepare print files";
+  }
+}
+
+function plateSVG(plate, pieces, bed) {
+  const [W, H] = bed;
+  const shapes = pieces.map((p) => {
+    const [cx, cy] = p.position_mm;
+    const y = H - cy; // bed origin is front-left; SVG y runs down
+    const [w, d] = p.diagonal ? p.strip_mm : p.size_mm;
+    const rot = p.diagonal ? ` transform="rotate(-45 ${cx} ${y})"` : "";
+    const cls = `piece${p.supports ? " supports" : ""}${p.name === selectedPiece ? " sel" : ""}`;
+    const label = p.name.replace(/_/g, " ");
+    const vertical = !p.diagonal && d > w * 1.6;
+    const tr = p.diagonal ? ` transform="rotate(-45 ${cx} ${y})"` : vertical ? ` transform="rotate(-90 ${cx} ${y})"` : "";
+    const fits = (p.diagonal ? w : vertical ? d : w) > label.length * 5;
+    return `<g data-piece="${esc(p.name)}"><title>${esc(p.name)}: on its ${p.on_bed}, ${p.size_mm.join(" × ")} mm${p.supports ? ", supports" : ""}</title>
+      <rect class="${cls}" x="${cx - w / 2}" y="${y - d / 2}" width="${w}" height="${d}" rx="1.5"${rot}/>
+      ${fits ? `<text x="${cx}" y="${y + 3}" text-anchor="middle"${tr}>${esc(label)}</text>` : ""}</g>`;
+  });
+  return `<svg viewBox="-2 -2 ${W + 4} ${H + 4}" role="img" aria-label="Plate ${plate.plate} layout">
+    <rect class="bed" x="0" y="0" width="${W}" height="${H}" rx="4"/>${shapes.join("")}</svg>`;
+}
+
+function renderPrint() {
+  const r = lastPrint;
+  const box = $("print-result");
+  if (!r) { box.innerHTML = ""; return; }
+  const byName = Object.fromEntries(r.pieces.map((p) => [p.name, p]));
+  let html = "";
+  if (r.total) html += `<p class="print-total"><b>${r.plates.length} plate${r.plates.length === 1 ? "" : "s"}</b>, about ${r.total.print_hours} h and ${r.total.filament_g} g in all.</p>`;
+  else html += `<p class="print-total"><b>${r.plates.length} plate${r.plates.length === 1 ? "" : "s"}</b>.</p>`;
+  html += `<a class="button wide" href="${r.zip}" download>Download everything (.zip)</a>`;
+  for (const plate of r.plates) {
+    const stats = [plate.filament, plate.print_time, plate.filament_g && `${plate.filament_g} g`].filter(Boolean).join(" · ");
+    const links = [
+      plate.files.gcode && `<a href="${plate.files.gcode}" download>G-code</a>`,
+      plate.files.project_3mf && `<a href="${plate.files.project_3mf}" download>3MF (AnkerMake Studio)</a>`,
+    ].filter(Boolean).join("");
+    html += `<div class="plate"><div class="plate-head"><b>Plate ${plate.plate}</b><span class="stats">${esc(stats)}</span></div>
+      ${plateSVG(plate, plate.parts.map((n) => byName[n]), r.bed)}
+      <div class="links">${links}</div>
+      ${plate.slice_error ? `<p class="error">${esc(plate.slice_error)}</p>` : ""}
+      ${plate.note ? `<p class="muted">${esc(plate.note)}</p>` : ""}</div>`;
+  }
+  // Per-part choices, editable.
+  const orient = printInfo.orientations.map((o) => `<option value="${o}">${o === "auto" ? "auto" : "on " + o}</option>`).join("");
+  html += `<div class="section-title" style="margin-top:12px">Parts <span class="muted small-text">change, then prepare again</span></div>
+    <table class="pieces"><tbody>`;
+  for (const p of r.pieces) {
+    if (p.name.includes("#")) continue;
+    const o = printOverrides[p.part] || {};
+    html += `<tr data-part="${esc(p.part)}" class="${Object.keys(o).length ? "changed" : ""}" title="${esc(p.why)}">
+      <td>${esc(p.name)}</td>
+      <td><select data-k="orientation">${orient}</select></td>
+      <td><select data-k="supports"><option value="auto">supports: ${p.supports ? "on" : "off"}</option><option value="on">supports on</option><option value="off">supports off</option></select></td></tr>`;
+  }
+  html += "</tbody></table>";
+  const notes = [];
+  if (r.too_big?.length) notes.push(...r.too_big.map((t) => `<li><b>${esc(t.part)}</b> is too big: ${esc(t.why)}</li>`));
+  if (r.not_printed?.length) notes.push(`<li>Not printed: ${r.not_printed.map((s) => esc(s.part)).join(", ")}</li>`);
+  if (r.slicer_note) notes.push(`<li>${esc(r.slicer_note)}</li>`);
+  if (notes.length) html += `<ul class="print-notes">${notes.join("")}</ul>`;
+  box.innerHTML = html;
+
+  for (const tr of box.querySelectorAll("tr[data-part]")) {
+    const part = tr.dataset.part;
+    const o = printOverrides[part] || {};
+    for (const sel of tr.querySelectorAll("select")) {
+      sel.value = o[sel.dataset.k] || "auto";
+      sel.addEventListener("change", () => {
+        const cur = { ...(printOverrides[part] || {}) };
+        if (sel.value === "auto") delete cur[sel.dataset.k]; else cur[sel.dataset.k] = sel.value;
+        if (Object.keys(cur).length) printOverrides[part] = cur; else delete printOverrides[part];
+        tr.classList.toggle("changed", !!printOverrides[part]);
+      });
+    }
+    tr.addEventListener("mouseenter", () => highlightPiece(part));
+  }
+  for (const g of box.querySelectorAll("g[data-piece]")) g.addEventListener("mouseenter", () => highlightPiece(g.dataset.piece));
+}
+
+function highlightPiece(name) {
+  selectedPiece = name;
+  for (const rect of $("print-result").querySelectorAll("g[data-piece] rect")) {
+    rect.classList.toggle("sel", rect.parentElement.dataset.piece === name);
+  }
+  for (const [pname, { group }] of partObjects) {
+    group.traverse((o) => { if (o.isMesh) o.material.emissive?.setHex(pname === name ? 0x334455 : 0x000000); });
+  }
+}
+
+$("print-go").addEventListener("click", preparePrint);
+initPrint();
+
+window.aicad = {
+  loadDesign,
+  // For scripted screenshots: camera position and look-at point in mm.
+  setView: (position, target) => { camera.position.set(...position); controls.target.set(...target); controls.update(); },
+  // Screen position (CSS pixels within the 3D view) of model points, for labelling screenshots.
+  project: (points) => {
+    controls.update();
+    camera.updateMatrixWorld();
+    const { clientWidth: w, clientHeight: h } = canvas;
+    return points.map((p) => {
+      const v = new THREE.Vector3(...p).project(camera);
+      return [((v.x + 1) / 2) * w, ((1 - v.y) / 2) * h];
+    });
+  },
+  // Where a part is drawn right now (after explode and motion), so labels can follow it.
+  partCenter: (name) => {
+    const obj = partObjects.get(name);
+    if (!obj) return null;
+    const box = new THREE.Box3().setFromObject(obj.group);
+    return box.getCenter(new THREE.Vector3()).toArray();
+  },
+  setExplode: (v) => { $("explode").value = v; $("explode").dispatchEvent(new Event("input")); } };
 init();
