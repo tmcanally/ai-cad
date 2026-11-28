@@ -255,6 +255,7 @@ function renderPanel() {
   $("params-section").style.display = Object.keys(info.params).length ? "" : "none";
   markUnsaved();
   renderHistory();
+  resetPrint();
 }
 
 // ---------- saved values and history ----------
@@ -544,6 +545,151 @@ async function init() {
   if (start) await loadDesign(start, !wanted && st.name === start ? st.params : {});
   setInterval(pollCurrent, 1500);
 }
+
+// ---------- print files ----------
+let printInfo = null;
+let printOverrides = {}; // part -> { orientation, supports }
+let lastPrint = null;
+let selectedPiece = null;
+
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+async function initPrint() {
+  try {
+    printInfo = await fetchJSON("/api/printers");
+  } catch { $("print-section").hidden = true; return; }
+  const p = printInfo.printers[0];
+  $("print-printer").textContent = `${p.name} · ${p.bed[0]}×${p.bed[1]}×${p.height} mm`;
+  $("print-filament").innerHTML = printInfo.filaments
+    .map((f) => `<option value="${f}">${f === "auto" ? "From parts" : f}</option>`).join("");
+  if (!printInfo.slicer) {
+    $("print-slicer-note").hidden = false;
+    $("print-slicer-note").textContent =
+      "PrusaSlicer isn't installed, so this makes .3mf plates to open in AnkerMake Studio. Install PrusaSlicer for ready-to-print G-code.";
+    $("print-slice").checked = false;
+    $("print-slice").disabled = true;
+  }
+}
+
+function resetPrint() {
+  printOverrides = {};
+  lastPrint = null;
+  selectedPiece = null;
+  $("print-result").innerHTML = "";
+}
+
+async function preparePrint() {
+  if (!current) return;
+  const btn = $("print-go");
+  const slice = $("print-slice").checked;
+  btn.disabled = true;
+  btn.textContent = slice ? "Slicing… (about a minute per plate)" : "Arranging…";
+  const settings = { infill: +$("print-infill").value, layer_height: +$("print-layer").value };
+  const fil = $("print-filament").value;
+  if (fil !== "auto") settings.filament = fil;
+  try {
+    lastPrint = await sendJSON("POST", `/api/designs/${current.name}/print`, {
+      params: current.params, settings, part_settings: printOverrides, slice,
+    });
+    renderPrint();
+  } catch (err) {
+    $("print-result").innerHTML = `<p class="plate error">${esc(err.message)}</p>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Prepare print files";
+  }
+}
+
+function plateSVG(plate, pieces, bed) {
+  const [W, H] = bed;
+  const shapes = pieces.map((p) => {
+    const [cx, cy] = p.position_mm;
+    const y = H - cy; // bed origin is front-left; SVG y runs down
+    const [w, d] = p.diagonal ? p.strip_mm : p.size_mm;
+    const rot = p.diagonal ? ` transform="rotate(-45 ${cx} ${y})"` : "";
+    const cls = `piece${p.supports ? " supports" : ""}${p.name === selectedPiece ? " sel" : ""}`;
+    const label = p.name.replace(/_/g, " ");
+    const vertical = !p.diagonal && d > w * 1.6;
+    const tr = p.diagonal ? ` transform="rotate(-45 ${cx} ${y})"` : vertical ? ` transform="rotate(-90 ${cx} ${y})"` : "";
+    const fits = (p.diagonal ? w : vertical ? d : w) > label.length * 5;
+    return `<g data-piece="${esc(p.name)}"><title>${esc(p.name)}: on its ${p.on_bed}, ${p.size_mm.join(" × ")} mm${p.supports ? ", supports" : ""}</title>
+      <rect class="${cls}" x="${cx - w / 2}" y="${y - d / 2}" width="${w}" height="${d}" rx="1.5"${rot}/>
+      ${fits ? `<text x="${cx}" y="${y + 3}" text-anchor="middle"${tr}>${esc(label)}</text>` : ""}</g>`;
+  });
+  return `<svg viewBox="-2 -2 ${W + 4} ${H + 4}" role="img" aria-label="Plate ${plate.plate} layout">
+    <rect class="bed" x="0" y="0" width="${W}" height="${H}" rx="4"/>${shapes.join("")}</svg>`;
+}
+
+function renderPrint() {
+  const r = lastPrint;
+  const box = $("print-result");
+  if (!r) { box.innerHTML = ""; return; }
+  const byName = Object.fromEntries(r.pieces.map((p) => [p.name, p]));
+  let html = "";
+  if (r.total) html += `<p class="print-total"><b>${r.plates.length} plate${r.plates.length === 1 ? "" : "s"}</b>, about ${r.total.print_hours} h and ${r.total.filament_g} g in all.</p>`;
+  else html += `<p class="print-total"><b>${r.plates.length} plate${r.plates.length === 1 ? "" : "s"}</b>.</p>`;
+  html += `<a class="button wide" href="${r.zip}" download>Download everything (.zip)</a>`;
+  for (const plate of r.plates) {
+    const stats = [plate.filament, plate.print_time, plate.filament_g && `${plate.filament_g} g`].filter(Boolean).join(" · ");
+    const links = [
+      plate.files.gcode && `<a href="${plate.files.gcode}" download>G-code</a>`,
+      plate.files.project_3mf && `<a href="${plate.files.project_3mf}" download>3MF (AnkerMake Studio)</a>`,
+    ].filter(Boolean).join("");
+    html += `<div class="plate"><div class="plate-head"><b>Plate ${plate.plate}</b><span class="stats">${esc(stats)}</span></div>
+      ${plateSVG(plate, plate.parts.map((n) => byName[n]), r.bed)}
+      <div class="links">${links}</div>
+      ${plate.slice_error ? `<p class="error">${esc(plate.slice_error)}</p>` : ""}
+      ${plate.note ? `<p class="muted">${esc(plate.note)}</p>` : ""}</div>`;
+  }
+  // Per-part choices, editable.
+  const orient = printInfo.orientations.map((o) => `<option value="${o}">${o === "auto" ? "auto" : "on " + o}</option>`).join("");
+  html += `<div class="section-title" style="margin-top:12px">Parts <span class="muted small-text">change, then prepare again</span></div>
+    <table class="pieces"><tbody>`;
+  for (const p of r.pieces) {
+    if (p.name.includes("#")) continue;
+    const o = printOverrides[p.part] || {};
+    html += `<tr data-part="${esc(p.part)}" class="${Object.keys(o).length ? "changed" : ""}" title="${esc(p.why)}">
+      <td>${esc(p.name)}</td>
+      <td><select data-k="orientation">${orient}</select></td>
+      <td><select data-k="supports"><option value="auto">supports: ${p.supports ? "on" : "off"}</option><option value="on">supports on</option><option value="off">supports off</option></select></td></tr>`;
+  }
+  html += "</tbody></table>";
+  const notes = [];
+  if (r.too_big?.length) notes.push(...r.too_big.map((t) => `<li><b>${esc(t.part)}</b> is too big: ${esc(t.why)}</li>`));
+  if (r.not_printed?.length) notes.push(`<li>Not printed: ${r.not_printed.map((s) => esc(s.part)).join(", ")}</li>`);
+  if (r.slicer_note) notes.push(`<li>${esc(r.slicer_note)}</li>`);
+  if (notes.length) html += `<ul class="print-notes">${notes.join("")}</ul>`;
+  box.innerHTML = html;
+
+  for (const tr of box.querySelectorAll("tr[data-part]")) {
+    const part = tr.dataset.part;
+    const o = printOverrides[part] || {};
+    for (const sel of tr.querySelectorAll("select")) {
+      sel.value = o[sel.dataset.k] || "auto";
+      sel.addEventListener("change", () => {
+        const cur = { ...(printOverrides[part] || {}) };
+        if (sel.value === "auto") delete cur[sel.dataset.k]; else cur[sel.dataset.k] = sel.value;
+        if (Object.keys(cur).length) printOverrides[part] = cur; else delete printOverrides[part];
+        tr.classList.toggle("changed", !!printOverrides[part]);
+      });
+    }
+    tr.addEventListener("mouseenter", () => highlightPiece(part));
+  }
+  for (const g of box.querySelectorAll("g[data-piece]")) g.addEventListener("mouseenter", () => highlightPiece(g.dataset.piece));
+}
+
+function highlightPiece(name) {
+  selectedPiece = name;
+  for (const rect of $("print-result").querySelectorAll("g[data-piece] rect")) {
+    rect.classList.toggle("sel", rect.parentElement.dataset.piece === name);
+  }
+  for (const [pname, { group }] of partObjects) {
+    group.traverse((o) => { if (o.isMesh) o.material.emissive?.setHex(pname === name ? 0x334455 : 0x000000); });
+  }
+}
+
+$("print-go").addEventListener("click", preparePrint);
+initPrint();
 
 window.aicad = {
   loadDesign,

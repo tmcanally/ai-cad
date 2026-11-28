@@ -11,7 +11,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from aicad import export, history, registry, state
+from aicad import export, history, printing, registry, state
 
 VIEWER_DIR = Path(__file__).resolve().parent / "viewer"
 
@@ -135,6 +135,64 @@ def api_stl(name: str, request: Request, part: str | None = Query(None)) -> Resp
         data = export.stl_zip_bytes(design)
         filename, media = f"{design.name}-stl.zip", "application/zip"
     return Response(data, media_type=media, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ---------- print files (orient, arrange and slice for a 3D printer) ----------
+
+
+def _print_dir(name: str, printer: str) -> Path:
+    if printer not in printing.PRINTERS:
+        raise HTTPException(400, f"Unknown printer {printer!r}. Known: {sorted(printing.PRINTERS)}")
+    return registry.project_root() / "exports" / name / printer
+
+
+@app.get("/api/printers")
+def api_printers() -> dict[str, Any]:
+    return {
+        "printers": [{"id": p.id, "name": p.name, "bed": list(p.bed), "height": p.height} for p in printing.PRINTERS.values()],
+        "filaments": ["auto", *printing.FILAMENTS],
+        "orientations": ["auto", *printing.ORIENTATIONS],
+        "slicer": printing.find_slicer(),
+    }
+
+
+@app.post("/api/designs/{name}/print")
+def api_print(name: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    """Body: {"params": {...}, "settings": {...}, "part_settings": {part: {...}}, "slice": true}."""
+    design, resolved = _build(name, body.get("params") or {})
+    settings = body.get("settings") or {}
+    try:
+        plan = printing.plan_print(design, settings, body.get("part_settings") or {})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    out = _print_dir(name, plan.job.printer)
+    summary = printing.write_print_job(plan, design, out, slice=bool(body.get("slice", True)))
+    base = f"/api/designs/{name}/print/{plan.job.printer}"
+    for plate in summary["plates"]:
+        plate["files"] = {k: f"{base}/files/{Path(plate[k]).name}" for k in ("project_3mf", "gcode") if plate.get(k)}
+    summary["zip"] = f"{base}/zip"
+    summary["params"] = resolved
+    summary["bed"] = list(plan.printer.bed)
+    return summary
+
+
+@app.get("/api/designs/{name}/print/{printer}/files/{filename}")
+def api_print_file(name: str, printer: str, filename: str) -> FileResponse:
+    folder = _print_dir(name, printer)
+    path = (folder / filename).resolve()
+    if path.parent != folder.resolve() or not path.is_file():
+        raise HTTPException(404, f"No file {filename!r}; prepare the print first")
+    return FileResponse(path, filename=filename)
+
+
+@app.get("/api/designs/{name}/print/{printer}/zip")
+def api_print_zip(name: str, printer: str) -> Response:
+    folder = _print_dir(name, printer)
+    if not folder.is_dir():
+        raise HTTPException(404, "Prepare the print first")
+    filename = f"{name}-{printer}.zip"
+    return Response(printing.job_zip_bytes(folder), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/")

@@ -46,6 +46,7 @@ Keep the viewer open (`uv run aicad serve --open`) and ask, for example, *"Make 
 | `undo_design` | Step back one version; repeat to keep going back |
 | `list_versions` / `restore_version` | See a design's history and bring back any version |
 | `export_stl` | One STL per part, into `exports/<name>/` |
+| `prepare_print` | Print-ready plates for the AnkerMake M5: orients and arranges the printed parts, picks supports, brim and infill, and writes a `.3mf` and sliced `.gcode` per plate |
 
 ## Command line
 
@@ -53,6 +54,7 @@ Keep the viewer open (`uv run aicad serve --open`) and ask, for example, *"Make 
 uv run aicad list                                     # designs
 uv run aicad serve --open                             # viewer
 uv run aicad export hinged_box --param width=100      # STLs into exports/hinged_box/
+uv run aicad print roman_shade --param print_pieces=1 # M5 plates into exports/roman_shade/ankermake_m5/
 uv run pytest                                         # tests
 ```
 
@@ -61,10 +63,33 @@ uv run pytest                                         # tests
 - **Explode**: slides each part along its own explode offset.
 - **Motion**: one slider per motion, plus **Play**. Hinges turn and sliders slide; motions that change shape (like fabric folding) rebuild the design along the way, and Play fetches those frames first.
 - **Parts**: show or hide each part, download its STL, or download all of them as a zip.
+- **Print**: arranges the printed parts on AnkerMake M5 plates and slices them. Shows each plate's layout, time and filament, with G-code and 3MF downloads. Change any part's orientation or supports and prepare again.
 - **Parameters**: change a number and the model rebuilds straight away. **Save values** keeps them; **Revert** goes back to the saved ones.
 - **History**: every change, from Claude or from you, is a numbered version with a note. **Undo** steps back, and **Restore** brings back any version.
 
 three.js is vendored in `src/aicad/viewer/vendor/`, so the viewer works offline.
+
+## Printing on the AnkerMake M5
+
+`aicad print <design>` (or `prepare_print` from Claude, or **Print** in the viewer) turns a design into files you can print:
+
+1. **Which parts.** Every part except bought ones. A material starting with "Buy", or naming metal, wood, fabric or filament pins, is left out. A design can say so explicitly with `Part(printable=False)`.
+2. **Which way up.** Each part is tried on all six sides. The pick has the least overhang (horizontal holes up to 10 mm and short bridges don't count), then the steadiest footprint. Parts too long to lie straight go across the bed's diagonal.
+3. **Settings.** Supports go on only where real overhangs remain. Tall, thin or small-footprint parts get a 5 mm brim. Infill is 20% with 3 walls and 0.2 mm layers. The filament comes from the part's material (PLA+ if none is given).
+4. **Plates.** Parts are packed onto as few 235 × 235 mm plates as possible, one filament per plate. A plate the slicer says would take more than 24 hours is split in two.
+5. **Files.** In `exports/<design>/ankermake_m5/`: a `.3mf` per plate that opens in AnkerMake Studio, PrusaSlicer or OrcaSlicer with everything in place and each part's settings attached, a sliced `.gcode` per plate, `PRINT-LIST.md`, and `plan.json`.
+
+Every choice can be overridden:
+
+```bash
+uv run aicad print roman_shade --param print_pieces=1 \
+    --set filament=PETG --set infill=30 \
+    --part headrail_1.orientation=back --part headrail_1.supports=on
+```
+
+Job settings: `filament`, `layer_height`, `spacing`, `max_plate_hours`. Per-part settings (with `--set` they apply to every part): `orientation` (`auto`, `bottom`, `top`, `front`, `back`, `left`, `right`), `supports` (`auto`/`on`/`off`), `infill`, `walls`, `brim`, `copies`. A design can set its own per-part defaults with `Part(print_settings={...})`.
+
+**Slicing needs PrusaSlicer** (free; AnkerMake Studio is built on it, but its command line isn't documented). Install it with `brew install --cask prusaslicer` on a Mac, or `sudo apt install prusa-slicer` on Linux. AI CAD finds it in `/Applications` or on your PATH, or set `AICAD_SLICER` to the binary. Without it you still get the `.3mf` plates: open one in AnkerMake Studio and press Slice. The M5 profile is `src/aicad/printers/ankermake_m5.ini`, based on AnkerMake's own PrusaSlicer profile.
 
 ## Describe, look, refine
 
@@ -101,6 +126,8 @@ src/aicad/
   design.py              Design / Part / Motion / Param, tessellation for the viewer
   registry.py            finds and builds designs (reloads files when they change)
   export.py              STL export (DXF/SVG next)
+  printing.py            print prep: orientation, supports, plate packing, 3MF, slicing
+  printers/              slicer profiles (AnkerMake M5)
   history.py             versions, undo and saved parameter values
   checks.py              parameter check run on every design Claude writes
   server.py              FastAPI app: viewer + JSON API
@@ -119,5 +146,5 @@ tests/
 2. **Laser and CNC**: DXF/SVG export of flat parts and sections, for the MOPA fiber laser and the FluidNC router.
 3. **CNC toolpaths**: 2.5D pocket and profile G-code for FluidNC.
 4. **UV printer**: artwork placement on 3D surfaces, including pre-distortion for rotary printing.
-5. **Printer profiles**: Marlin printer bed sizes and print orientation checks.
+5. ~~**AnkerMake M5 printing**: orientation, supports, plate packing, 3MF and sliced G-code.~~ More printer profiles (Marlin machines) next.
 6. More joint types (sliders, gears) and collision checks over a motion's whole range.
