@@ -148,8 +148,7 @@ def test_print_pieces_fit_the_printer_and_pin_together(motorized):
     printed = [p for p in design.parts if p.material.startswith("Print")]
     groups = {p.name.rsplit("_", 1)[0] for p in printed}
     expected = {"headrail", "channel_left", "channel_right", "middle_rail", "bottom_rail"}
-    if motorized:
-        expected |= {"motor_mount", "shaft_mount", "idler_mount"}
+    expected |= {"motor_mount", "shaft_mount", "idler_mount"} if motorized else {"spring_mount", "drum_middle", "drum_bottom"}
     assert groups == expected
     for p in printed:
         assert p.shape.is_valid and len(p.shape.solids()) == 1, p.name
@@ -266,8 +265,39 @@ def test_no_channel_version_hangs_on_hidden_cords(motorized, top_drop, bottom_ra
 def test_no_channel_print_pieces_fit_the_printer():
     design, _ = registry.build("roman_shade", {"side_channels": 0, "print_pieces": 1})
     printed = [p for p in design.parts if p.material.startswith("Print")]
-    assert {p.name.rsplit("_", 1)[0] for p in printed} == {"headrail", "middle_rail", "bottom_rail"}
+    assert {p.name.rsplit("_", 1)[0] for p in printed} == {
+        "headrail", "middle_rail", "bottom_rail", "motor_mount", "shaft_mount", "spool_middle", "spool_bottom"}
     for p in printed:
         assert p.shape.is_valid and len(p.shape.solids()) == 1, p.name
         dims = sorted(tuple(p.shape.bounding_box().size))
         assert all(d <= b for d, b in zip(dims, sorted(M5_BED))), (p.name, dims)
+
+
+VARIANTS = [
+    {"side_channels": 1, "motorized": 0},
+    {"side_channels": 1, "motorized": 1},
+    {"side_channels": 0, "motorized": 0},
+    {"side_channels": 0, "motorized": 1},
+]
+EXPECTED_MOUNTS = [
+    {"spring_mount", "drum_middle", "drum_bottom"},
+    {"motor_mount", "shaft_mount", "idler_mount"},
+    {"motor_mount", "shaft_mount", "spool_middle", "spool_bottom"},
+    {"motor_mount", "shaft_mount", "spool_middle", "spool_bottom"},
+]
+
+
+@pytest.mark.parametrize("variant,expected", list(zip(VARIANTS, EXPECTED_MOUNTS)))
+@pytest.mark.parametrize("position", [{}, {"top_drop": 5000, "bottom_raise": 5000}])
+def test_every_version_has_printable_mounts_that_clear_everything(variant, expected, position):
+    design, _ = registry.build("roman_shade", {**variant, **position})
+    mounts = [p for p in design.parts if p.material.startswith("Print")]
+    assert {p.name.rsplit("_", 1)[0] for p in mounts} == expected
+    others = [p for p in design.parts if p not in mounts and p.name not in ("fabric",)]
+    for m in mounts:
+        assert m.shape.is_valid and len(m.shape.solids()) == 1, m.name
+        dims = sorted(tuple(m.shape.bounding_box().size))
+        assert all(d <= b for d, b in zip(dims, sorted(M5_BED))), (m.name, dims)
+        for o in others + [x for x in mounts if x is not m]:
+            for s in o.shape.solids():
+                assert not _overlap(m.shape, s), (m.name, o.name)
