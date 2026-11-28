@@ -92,3 +92,6 @@ button:disabled { opacity: 0.45; cursor: default; }
   #viewport { height: 60vh; flex: none; }
   #panel { width: 100%; border-left: none; border-top: 1px solid var(--border); }
 }
+
+#params details.advanced { margin: 4px 0 8px; border-top: 1px solid var(--border); padding-top: 6px; }
+#params details.advanced summary { cursor: pointer; font-size: 13px; font-weight: 600; margin-bottom: 8px; }

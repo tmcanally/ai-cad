@@ -23,6 +23,7 @@ class Param:
     max: float | None = None
     unit: str = "mm"
     description: str = ""
+    advanced: bool = False  # tucked under "Advanced" in the viewer
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,6 +32,7 @@ class Param:
             "max": self.max,
             "unit": self.unit,
             "description": self.description,
+            "advanced": self.advanced,
         }
 
 

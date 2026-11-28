@@ -33,7 +33,7 @@ def _params_from_query(request: Request) -> dict[str, Any]:
 
 def _build(name: str, params: dict[str, Any]):
     try:
-        return registry.build(name, params)
+        return registry.build(name, params, strict=False)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

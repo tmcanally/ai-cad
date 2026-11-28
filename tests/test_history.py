@@ -138,3 +138,26 @@ def test_viewer_api_save_undo_restore():
     assert client.post("/api/designs/plate/restore/99").status_code == 404
     assert client.post("/api/designs/plate/params", json={"params": {"nope": 1}}).status_code == 400
     assert client.delete("/api/designs/plate/params").json()["params"]["width"] == 30
+
+
+def test_viewer_ignores_parameters_a_design_no_longer_has():
+    from fastapi.testclient import TestClient
+    import json
+    from aicad.server import app
+
+    client = TestClient(app)
+    r = client.get("/api/designs/roman_shade", params={"params": json.dumps({"window_width": 800, "gone_param": 3})})
+    assert r.status_code == 200, r.text
+    assert r.json()["params"]["window_width"] == 800
+
+
+def test_reset_clears_saved_values():
+    from fastapi.testclient import TestClient
+    from aicad.server import app
+
+    client = TestClient(app)
+    assert client.post("/api/designs/hinged_box/params", json={"params": {"width": 77}}).status_code == 200
+    assert client.get("/api/designs/hinged_box").json()["params"]["width"] == 77
+    assert client.delete("/api/designs/hinged_box/params").status_code == 200
+    data = client.get("/api/designs/hinged_box").json()
+    assert data["params"]["width"] != 77 and data["saved_params"].get("width") != 77

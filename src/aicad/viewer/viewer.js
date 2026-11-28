@@ -230,6 +230,13 @@ function renderPanel() {
   const form = $("params");
   form.innerHTML = "";
   const driven = new Set(data.motions.filter((m) => m.param).map((m) => m.param));
+  // Advanced parameters go in a collapsed section; it stays open across rebuilds once opened.
+  const advanced = document.createElement("details");
+  advanced.className = "advanced";
+  advanced.open = advancedOpen;
+  advanced.addEventListener("toggle", () => { advancedOpen = advanced.open; });
+  const advCount = Object.entries(info.params).filter(([k, s]) => s.advanced && !driven.has(k)).length;
+  advanced.innerHTML = `<summary>Advanced <span class="unit">(${advCount})</span></summary>`;
   for (const [key, spec] of Object.entries(info.params)) {
     if (driven.has(key)) continue; // shown as a Motion slider instead
     const label = document.createElement("label");
@@ -242,8 +249,9 @@ function renderPanel() {
     if (spec.max != null) input.max = spec.max;
     input.value = params[key] ?? spec.default;
     label.appendChild(input);
-    form.appendChild(label);
+    (spec.advanced ? advanced : form).appendChild(label);
   }
+  if (advCount) form.appendChild(advanced);
   $("params-section").style.display = Object.keys(info.params).length ? "" : "none";
   markUnsaved();
   renderHistory();
@@ -271,6 +279,7 @@ function markUnsaved() {
 }
 
 let showAllVersions = false;
+let advancedOpen = false;
 async function renderHistory() {
   if (!current) return;
   const name = current.name;
@@ -333,7 +342,7 @@ async function loadDesign(name, params = {}, { keepView = false } = {}) {
     history.replaceState(null, "", url);
     setStatus("");
   } catch (err) {
-    setStatus(`Could not build ${name}:\n${err.message}`, true);
+    setStatus(`Could not build ${name}:\n${err.message}\n\nIf saved or edited values caused this, press "Reset to defaults" under Parameters.`, true);
   }
 }
 
@@ -475,6 +484,22 @@ $("save-params").addEventListener("click", () => {
   historyAction("POST", "params", "Saving…", { params: changed });
 });
 $("revert-params").addEventListener("click", () => current && loadDesign(current.name, {}, { keepView: true }));
+// Reset: forget saved values (kept in history, so Undo brings them back) and rebuild from the
+// design's defaults. Works even when the last build failed.
+$("reset-params").addEventListener("click", async () => {
+  const name = current?.name || $("design-select").value;
+  if (!name) return;
+  setStatus("Resetting to defaults…");
+  try {
+    const res = await sendJSON("DELETE", `/api/designs/${encodeURIComponent(name)}/params`);
+    lastStateVersion = res.state_version;
+    motionValues = new Map();
+    frameCache.clear();
+    await loadDesign(name, {}, { keepView: true });
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+});
 $("undo").addEventListener("click", () => historyAction("POST", "undo", "Undoing…"));
 $("more-versions").addEventListener("click", () => { showAllVersions = true; renderHistory(); });
 
