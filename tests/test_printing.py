@@ -105,7 +105,7 @@ def test_many_parts_fill_several_plates_inside_the_bed():
 def test_roman_shade_pieces_plan():
     design, _ = registry.build("roman_shade", {"print_pieces": 1})
     plan = printing.plan_print(design)
-    assert len(plan.pieces) == 22 and not plan.too_big
+    assert len(plan.pieces) == 28 and not plan.too_big  # 22 long pieces + 6 spring mounts and drums
     skipped = {s["part"] for s in plan.skipped}
     assert {"fabric", "springs", "battens"} <= skipped and any(s.startswith("pins_") for s in skipped)
     assert not any(p.supports for p in plan.pieces)
