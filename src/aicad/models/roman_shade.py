@@ -31,6 +31,19 @@ with the power off. A controller board (ESP32 + two TMC2209 drivers, which can
 home without limit switches) sits on the back wall of the headrail. One power
 lead goes into the headrail; nothing else shows.
 
+Without side channels (side_channels = 0)
+-----------------------------------------
+For windows with no room for channels, or a simpler build: the rails hang
+on cords instead, the way store-bought cordless shades work. Each rail has a
+spring motor (or a geared motor when motorized = 1) in the headrail turning
+an axle with a cord spool near each end. The middle rail's two cords drop
+straight to its top. The bottom rail's two cords pass through holes in the
+middle rail, then down behind the battens (through rings on the batten
+pockets) to the bottom rail, so they are hidden by the fabric. The one place
+cords show is the gap between the headrail and the middle rail when the top
+is lowered; clear monofilament keeps that nearly invisible. Nothing guides
+the rail ends, so they hang free with a small gap to the frame.
+
 Printing it (print_pieces = 1)
 ------------------------------
 Every structural part is sized for a home 3D printer. The headrail, side
@@ -77,6 +90,12 @@ PARAMS = {
     "spring_diameter": Param(28, 12, 40, description="Constant-force spring coil diameter"),
     "tape_width": Param(8, 4, 20, description="Spring tape width"),
     "motorized": Param(0, 0, 1, unit="", description="Drive: 0 = springs (push by hand), 1 = motors and belts"),
+    "side_channels": Param(1, 0, 1, unit="", description="1 = rails ride in side channels (no cords), 0 = rails hang on cords"),
+    "side_gap": Param(3, 1, 15, description="No-channel version: gap between each rail end and the frame"),
+    "cord_inset": Param(120, 40, 400, description="No-channel version: middle rail cords' distance in from each side"),
+    "cord_spacing": Param(30, 15, 100, description="No-channel version: how far inboard the bottom rail's cords run"),
+    "cord_diameter": Param(0.5, 0.3, 2, description="No-channel version: lift cord diameter (clear monofilament)"),
+    "spool_diameter": Param(12, 8, 20, description="No-channel version: cord spool diameter"),
     "motor_size": Param(20, 14, 28, description="Stepper body size (20 = NEMA 8, 28 = NEMA 11)"),
     "motor_length": Param(45, 25, 80, description="Motor length including its gearbox"),
     "pulley_diameter": Param(10, 6, 16, description="Belt pulley diameter (10 = GT2 16-tooth)"),
@@ -112,6 +131,12 @@ def build(
     spring_diameter=28,
     tape_width=8,
     motorized=0,
+    side_channels=1,
+    side_gap=3,
+    cord_inset=120,
+    cord_spacing=30,
+    cord_diameter=0.5,
+    spool_diameter=12,
     motor_size=20,
     motor_length=45,
     pulley_diameter=10,
@@ -129,7 +154,8 @@ def build(
     rh, rd, bt, ft = rail_height, rail_depth, batten_size, fabric_thickness
     top = H - headrail_height  # underside of the headrail
     mw = max(mount_wall, wall)
-    inner_w = W - 2 * cw  # clear width between the channels
+    channels_on = side_channels >= 0.5
+    inner_w = W - 2 * cw if channels_on else W - 2 * side_gap  # rail length between the channels or the frame
     inner_cw = cw - wall - mw  # inside width of a channel
     chan_x = W / 2 - mw - inner_cw / 2  # centre line of each channel's inside
 
@@ -163,8 +189,8 @@ def build(
         body -= Pos(side * (W / 2 - cw + wall / 2), 0, -1) * Box(wall * 2, slot_width, top + 2, align=C_MIN)
         return body
 
-    channel_l, channel_r = channel(-1), channel(1)
-    channels = channel_l + channel_r
+    channel_l, channel_r = (channel(-1), channel(1)) if channels_on else (None, None)
+    channels = channel_l + channel_r if channels_on else None
 
     # ---------------- headrail with spring housings ----------------
     head = Pos(0, 0, top) * Box(W, headrail_depth, headrail_height, align=C_MIN)
@@ -181,7 +207,34 @@ def build(
     drive, belts = [], []
     mounts: list[tuple[str, object]] = []  # printed brackets: (name, shape)
     head_holes, channel_holes = [], []
-    if not motor_on:
+    cords, cord_holes = [], []  # no-channel version: lift cords, and their holes through the middle rail
+    if not channels_on:
+        # Two axles run along the headrail, one per rail, each turned by a spring motor
+        # (or a geared motor) and carrying a cord spool near each end. A cord leaves its
+        # spool on the back of the spool and drops straight down. The middle rail's cords
+        # land on its top; the bottom rail's pass through the middle rail and down behind
+        # the battens to the bottom rail.
+        sr = spool_diameter / 2
+        cr = cord_diameter / 2
+        pz = top + headrail_height / 2
+        cord_y = {"middle": 0.0, "bottom": ft + bt + cord_diameter + 0.5}  # behind the battens
+        spool_y = {k: v - sr for k, v in cord_y.items()}
+        cord_x = {"middle": W / 2 - cord_inset, "bottom": W / 2 - cord_inset - cord_spacing}
+        axle_r = 2.5
+        motor_h = min(headrail_height - 2 * wall - 2, 24)
+        for rail, end_z, motor_x in (("middle", mid_top, -W / 4), ("bottom", bottom_raise + rh, W / 4)):
+            y = spool_y[rail]
+            drive.append(Pos(0, y, pz) * Rot(0, 90, 0) * Cylinder(axle_r, 2 * cord_x[rail] + spool_diameter))
+            # Motor housing straddles the axle; its depth stops short of the other axle.
+            drive.append(Pos(motor_x, y, pz) * Box(motor_length * 2, sr * 2 - 0.5, motor_h))
+            for side in (-1, 1):
+                x = side * cord_x[rail]
+                drive.append(Pos(x, y, pz) * Rot(0, 90, 0) * Cylinder(sr, spool_diameter))
+                cords.append(Pos(x, cord_y[rail], end_z) * Cylinder(cr, pz - end_z, align=C_MIN))
+                head_holes.append(Pos(x, cord_y[rail], top) * Cylinder(cr + 1, wall * 3))
+                if rail == "bottom":
+                    cord_holes.append(Pos(x, cord_y[rail], 0) * Cylinder(cr + 1, H, align=C_MIN))
+    elif not motor_on:
         # Each channel has two springs, one per rail. A coil's axis runs across the
         # window; its tape leaves the coil tangentially and drops straight down the
         # channel. The middle rail's tape runs down the front of the channel and the
@@ -284,19 +337,19 @@ def build(
     # Screw holes for the mounts: through the headrail's back wall and the channels' frame-side wall.
     for h in head_holes:
         head = head - h
-    for h in channel_holes:
+    for h in channel_holes if channels_on else []:
         if h.bounding_box().center().X < 0:
             channel_l = channel_l - h
         else:
             channel_r = channel_r - h
-    if channel_holes:
+    if channel_holes and channels_on:
         channels = channel_l + channel_r
 
     # ---------------- rails with end carriers ----------------
     def rail(z_bottom: float, carrier_y: float, carrier_d: float, clamp_y: float | None = None):
         body = Pos(0, 0, z_bottom) * Box(inner_w, rd, rh, align=C_MIN)
         body = fillet(body.edges().filter_by(Axis.X).group_by(Axis.Y)[0], min(4, rh / 4))
-        for side in (-1, 1):
+        for side in (-1, 1) if channels_on else ():
             # Tongue through the slot, then a carrier block inside the channel.
             body += Pos(side * (inner_w / 2 + wall), 0, z_bottom + rh / 2) * Box(wall * 2 + 2, slot_width - 1, rh * 0.6)
             if clamp_y is None:  # spring version: carrier fills the channel width, with friction pads
@@ -313,7 +366,12 @@ def build(
             body += Pos(0, -rd / 2 - 4, z_bottom + rh / 2) * Box(handle_length, 8, rh * 0.35)
         return body
 
-    if not motor_on:
+    if not channels_on:
+        middle = rail(z0, 0, 0)
+        for h in cord_holes:  # the bottom rail's cords pass through
+            middle = middle - h
+        bottom = rail(bottom_raise, 0, 0)
+    elif not motor_on:
         # Middle carrier stays in the front of the channel so the bottom rail's tape passes behind it.
         cd_in = inner_d - 1
         middle = rail(z0, -cd_in * 0.2, cd_in * 0.55)
@@ -325,8 +383,10 @@ def build(
 
     # ---------------- battens with pins into the channels ----------------
     batten_y = ft + bt / 2  # just behind the fabric, inside its pocket
+    # With channels the battens' ends ride in them; without, they stop inside the fabric's edges.
+    batten_len = W - 2 * mw - 2 if channels_on else inner_w - 2 * bt
     battens = [
-        Pos(0, batten_y, z) * Box(W - 2 * mw - 2, bt, bt) for z in anchors[1:-1]
+        Pos(0, batten_y, z) * Box(batten_len, bt, bt) for z in anchors[1:-1]
     ]
 
     # ---------------- fabric: flat where taut, folded forward where slack ----------------
@@ -342,21 +402,37 @@ def build(
         f"{n_folds} folds of {pitch:.0f} mm, {n_battens} battens. "
         + ("Shade fully closed. " if open_gap and top_drop == 0 and bottom_raise == 0 else "")
         + (
-            "No lift cords: rails are carried by constant-force springs inside the channels and held by friction pads."
+            "No side channels: each rail hangs on two cords from spools in the headrail; the bottom rail's cords run "
+            "through the middle rail and behind the battens. Cords show only between the headrail and the middle rail. "
+            + ("Geared motors turn the spool axles." if motor_on else "Spring motors turn the spool axles, so you move the rails by hand.")
+            if not channels_on
+            else "No lift cords: rails are carried by constant-force springs inside the channels and held by friction pads."
             if not motor_on
             else "Motorized: each rail is driven at both ends by belts inside the channels; the geared motors hold it with the power off."
         )
     )
+    if not channels_on:
+        drive_parts = [
+            Part("drive", Compound(drive), color="#5b6470", explode=(0, 0, headrail_height * 3),
+                 material=("Buy: 2 geared motors" if motor_on else "Buy: 2 cordless-shade spring motors")
+                 + ", 2 axles, 4 cord spools" + (", ESP32 + 2 drivers" if motor_on else "")),
+            Part("cords", Compound(cords), color="#7a9cc6", explode=(0, 0, 0),
+                 material=f"Buy: {cord_diameter:g} mm clear monofilament"),
+        ]
+    elif not motor_on:
+        drive_parts = [Part("springs", Compound(springs + tapes), color="#8f99a6", explode=(0, 0, headrail_height * 3),
+                            material="Buy: 4 constant-force springs (steel tape)")]
+    else:
+        drive_parts = [
+            Part("drive", Compound(drive), color="#5b6470", explode=(0, 0, headrail_height * 3),
+                 material="Buy: 2 geared steppers, 2 shafts, 4 GT2 pulleys + 4 idlers, ESP32 + 2 TMC2209"),
+            Part("belts", Compound(belts), color="#c9772b", explode=(0, 0, 0), material="Buy: GT2 timing belt"),
+        ]
     bought = [
-        *([Part("springs", Compound(springs + tapes), color="#8f99a6", explode=(0, 0, headrail_height * 3),
-                material="Buy: 4 constant-force springs (steel tape)")] if not motor_on else [
-           Part("drive", Compound(drive), color="#5b6470", explode=(0, 0, headrail_height * 3),
-                material="Buy: 2 geared steppers, 2 shafts, 4 GT2 pulleys + 4 idlers, ESP32 + 2 TMC2209"),
-           Part("belts", Compound(belts), color="#c9772b", explode=(0, 0, 0), material="Buy: GT2 timing belt"),
-        ]),
+        *drive_parts,
         Part("fabric", Compound(folds), color="#e8dcc4", explode=(0, -rd * 3, 0), material="Buy: fabric"),
         Part("battens", Compound(battens) if battens else Box(1, 1, 1), color="#a0724a", explode=(0, rd * 4, 0),
-             material=f"Buy: {n_battens} x {bt:g} mm dowels, {W - 2 * mw - 2:.0f} mm long"),
+             material=f"Buy: {n_battens} x {bt:g} mm dowels, {batten_len:.0f} mm long"),
     ]
 
     mount_colors = {"motor": "#7fb069", "shaft": "#e6aa68", "idler": "#c97b84"}
@@ -366,7 +442,7 @@ def build(
              material=PRINT)
         for name, shape in mounts
     ]
-    if motor_on:
+    if motor_on and channels_on:
         notes += " Hardware: 4 M3x16 screws (idler axles), 4 M2x6 (motor to bulkhead), 4 M3x10 (bulkheads, through the headrail back)."
 
     if print_pieces < 0.5:
@@ -375,7 +451,8 @@ def build(
             parts=[
                 Part("headrail", head, color="#d7dbe0", explode=(0, 0, headrail_height * 3), material="Aluminium or printed PETG"),
                 *bought[:-2],
-                Part("channels", channels, color="#c3c9d1", explode=(0, 0, 0), material="Aluminium or printed PETG"),
+                *([Part("channels", channels, color="#c3c9d1", explode=(0, 0, 0), material="Aluminium or printed PETG")]
+                  if channels_on else []),
                 *mount_parts,
                 Part("middle_rail", middle, color="#4f7cac", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
                 Part("bottom_rail", bottom, color="#3d5f86", explode=(0, -rd * 6, 0), material="Aluminium + printed carriers"),
@@ -445,7 +522,7 @@ def build(
         "#d7dbe0", (0, 0, hz * 3),
     )
     # Channels: pins in the thick frame-side wall; screw holes through it into the frame.
-    for side, chan, label in ((-1, channel_l, "channel_left"), (1, channel_r, "channel_right")):
+    for side, chan, label in ((-1, channel_l, "channel_left"), (1, channel_r, "channel_right")) if channels_on else ():
         wall_x = side * (W / 2 - mw / 2)
         pieces(
             label, chan, 2,

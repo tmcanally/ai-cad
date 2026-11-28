@@ -210,3 +210,64 @@ def test_motor_mounts_fit_and_clear_everything(top_drop, bottom_raise):
             bb = m.shape.bounding_box()
             through = [s for s in shafts if s.bounding_box().min.X < bb.min.X and bb.max.X < s.bounding_box().max.X]
             assert len(through) == 2, m.name
+
+
+@pytest.mark.parametrize("motorized,top_drop,bottom_raise", [(0, 0, 0), (0, 300, 250), (1, 5000, 5000)])
+def test_no_channel_version_hangs_on_hidden_cords(motorized, top_drop, bottom_raise):
+    design, params = registry.build(
+        "roman_shade",
+        {"side_channels": 0, "motorized": motorized, "top_drop": top_drop, "bottom_raise": bottom_raise},
+    )
+    names = {p.name for p in design.parts}
+    assert "channels" not in names and {"drive", "cords"} <= names
+    for part in design.parts:
+        assert part.shape.is_valid, part.name
+        part.shape.tessellate(0.05, 0.2)
+
+    head = design.part("headrail").shape
+    hb = head.bounding_box()
+    middle = design.part("middle_rail").shape
+    bottom = design.part("bottom_rail").shape
+    battens = design.part("battens").shape
+    fabric = design.part("fabric").shape
+    W = params["window_width"]
+    for rail in (middle, bottom):  # rails hang free of the frame
+        rb = rail.bounding_box()
+        assert -W / 2 < rb.min.X and rb.max.X < W / 2
+
+    cords = design.part("cords").shape.solids()
+    assert len(cords) == 4
+    mid_top = z_range(middle)[1]
+    behind = max(battens.bounding_box().max.Y, fabric.bounding_box().max.Y)
+    for c in cords:
+        cb = c.bounding_box()
+        assert not _overlap(c, head)  # through holes in the headrail floor
+        assert not _overlap(c, middle) and not _overlap(c, bottom)
+        assert not _overlap(c, battens) and not _overlap(c, fabric)
+        assert hb.min.Z < cb.max.Z < hb.max.Z  # top end on a spool inside the headrail
+        if cb.min.Z < mid_top - 1:  # a bottom-rail cord: hidden behind the fabric below the middle rail
+            assert cb.min.Y > behind
+            assert cb.min.Z == pytest.approx(z_range(bottom)[1], abs=0.5)
+        else:
+            assert cb.min.Z == pytest.approx(mid_top, abs=0.5)
+
+    # Motors, axles and spools stay inside the headrail and clear of the other rail's axle.
+    drive = design.part("drive").shape.solids()
+    for d in drive:
+        db = d.bounding_box()
+        assert hb.min.Y < db.min.Y and db.max.Y < hb.max.Y and hb.min.Z < db.min.Z and db.max.Z < hb.max.Z
+        assert not _overlap(d, head)
+    axles = [d for d in drive if d.bounding_box().size.X > W * 0.4 and d.bounding_box().size.Z < 10]
+    assert len(axles) == 2
+    for d in drive:
+        assert sum(_overlap(d, a) for a in axles) <= 1, d.bounding_box()
+
+
+def test_no_channel_print_pieces_fit_the_printer():
+    design, _ = registry.build("roman_shade", {"side_channels": 0, "print_pieces": 1})
+    printed = [p for p in design.parts if p.material.startswith("Print")]
+    assert {p.name.rsplit("_", 1)[0] for p in printed} == {"headrail", "middle_rail", "bottom_rail"}
+    for p in printed:
+        assert p.shape.is_valid and len(p.shape.solids()) == 1, p.name
+        dims = sorted(tuple(p.shape.bounding_box().size))
+        assert all(d <= b for d, b in zip(dims, sorted(M5_BED))), (p.name, dims)
